@@ -547,7 +547,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: workspace-${{ matrix.os }}
-          path: .
+          path: |
+            .
+            !.git
+            !.git/**
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
@@ -802,7 +806,7 @@ jobs:
         with:
           pattern: workspace-*
           merge-multiple: true
-          path: ${{ vars.BUILD_CONTEXT || '.' }}
+          path: .
 
       - name: Validate Dockerfile
         shell: bash
