@@ -15,11 +15,27 @@
    jobs:
      ci-cd:
        uses: cat-of-summer/git_toolkit/.github/workflows/ci-cd.yml@main
-       secrets: inherit
+       secrets:
+         DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+         DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+         PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+         PACKAGIST_API_TOKEN: ${{ secrets.PACKAGIST_API_TOKEN }}
    ```
 
-**`secrets: inherit`** передаёт все секреты вызывающего репозитория в reusable workflow —
-объявлять их по отдельности не нужно.
+**Секреты перечисляются поимённо.** `secrets: inherit` не используется: если джоба вызванного
+workflow объявляет `environment`, унаследованные секреты до неё доходят не всегда. Блок `secrets:`
+из шаблона не удаляй и не сокращай, даже если часть секретов в проекте не задана — незаданный
+секрет резолвится в пустую строку и просто выключает свой шаг.
+
+**Где ищется секрет: сначала Environment ветки, потом секреты репозитория.** Приоритет
+обеспечивает сам GitHub: джобы reusable workflow объявляют `environment`, а
+[по документации](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)
+значение из Environment перекрывает переданное из шаблона. Строка `${{ secrets.X }}` в самом
+шаблоне видит только секреты репозитория и организации — объявить `environment` у джобы с `uses:`
+GitHub не позволяет.
+
+**`GITHUB_TOKEN` передавать не надо** — он доступен вызванному workflow всегда, а объявить секрет
+с таким именем GitHub запрещает.
 
 **`vars` и `secrets`** внутри логики резолвятся из **твоего** репозитория и его окружений
 (environments), а не из git_toolkit. То есть каждый проект настраивает себя сам.
@@ -36,7 +52,7 @@
 
 | Шаблон | Триггеры | Назначение | Настройка |
 |---|---|---|---|
-| `ci-cd.yml` | `push` (ветки и теги `v*`), `pull_request`, `workflow_dispatch` | Сборка и тесты, GitHub Release, публикация в npm / Docker / Packagist, деплой | Переменные и секреты в Environment — [документация](../../docs/.github/workflows/ci-cd.yml.md) |
+| `ci-cd.yml` | `push` (ветки и теги `v*`), `pull_request`, `workflow_dispatch` | Сборка и тесты, GitHub Release, публикация в npm / Docker / Packagist, деплой | Переменные в Environment; секреты — в Environment или в репозитории — [документация](../../docs/.github/workflows/ci-cd.yml.md) |
 | `grabber.yml` | `workflow_dispatch` | Забирает файлы с сервера в репозиторий, складывает в ветку `sync/...` | `DEPLOY_*` + секрет `DEPLOY_KEY` — [документация](../../docs/.github/workflows/grabber.yml.md) |
 | `docgen.yml` | `push` (только ветки), `workflow_dispatch` | Держит структуру `docs/` в соответствии с деревом репозитория | Только `docs/.docignore` — [документация](../../docs/.github/workflows/docgen.yml.md) |
 | `minifier.yml` | `push` (только ветки) | Минифицирует `.css` и `.js`, коммитит `*.min.*` | Не настраивается — [документация](../../docs/.github/workflows/minifier.yml.md) |

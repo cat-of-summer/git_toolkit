@@ -28,10 +28,20 @@
 jobs:
   ci-cd:
     uses: cat-of-summer/git_toolkit/.github/workflows/ci-cd.yml@main
-    secrets: inherit
+    secrets:
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+      DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      PACKAGIST_API_TOKEN: ${{ secrets.PACKAGIST_API_TOKEN }}
 ```
 
-- `secrets: inherit` передаёт все секреты вызывающего репозитория — объявлять их поштучно не нужно.
+- Секреты перечисляются поимённо; `secrets: inherit` не используется — до джоб, объявляющих
+  `environment`, унаследованные секреты доходят не всегда. Блок `secrets:` не сокращай: незаданный
+  секрет резолвится в пустую строку и просто выключает свой шаг.
+- Секрет ищется **сначала в Environment ветки, потом в секретах репозитория** — значение из
+  Environment перекрывает переданное из шаблона. Сама строка `${{ secrets.X }}` в шаблоне видит
+  только секреты репозитория и организации.
+- `GITHUB_TOKEN` передавать не надо — он доступен вызванному workflow всегда.
 - `vars` и `secrets` резолвятся из **твоего** репозитория и его Environments, а не из git_toolkit:
   каждый проект настраивает себя сам.
 - Ссылка `@main` даёт свежую версию; для стабильности можно закрепиться на теге или коммите

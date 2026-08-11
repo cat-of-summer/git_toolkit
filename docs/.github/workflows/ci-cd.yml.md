@@ -164,13 +164,31 @@ Actions → **ci/cd** → **Run workflow**. В **Use workflow from** выбир�
 
 | Секрет | Где нужен | Смысл |
 |---|---|---|
-| `GITHUB_TOKEN` | всегда | Встроенный, задавать не надо. Release, GitHub Packages, `ghcr.io` |
+| `GITHUB_TOKEN` | всегда | Встроенный, задавать и передавать не надо. Release, GitHub Packages, `ghcr.io` |
 | `DEPLOY_KEY` | cd | Приватный SSH-ключ; для `DEPLOY_METHOD=FTP` — пароль |
 | `DOCKER_TOKEN` | docker | Пароль реестра (для `ghcr.io` не нужен — подставится `GITHUB_TOKEN`) |
 | `PAT_TOKEN` | docker | Пробрасывается в образ как build-arg `GH_TOKEN` (если на сборке нужен приватный доступ) |
 | `PACKAGIST_API_TOKEN` | packagist | Токен Packagist; для **первой** публикации нужен MAIN-токен |
 
-> Токен npmjs **не нужен**: публикация идёт через OIDC trusted publishing.
+> Токен npmjs **не нужен**: публикация идёт через OIDC trusted publishing. В GitHub Packages
+> публикация идёт под `GITHUB_TOKEN`. То есть для npm секретов не требуется вообще.
+
+### Где хранить: Environment или секреты репозитория
+
+Подходит и то, и другое. Каждый секрет из таблицы ищется **сначала в Environment ветки, потом в
+секретах репозитория** — значение из Environment перекрывает значение из репозитория. Удобно
+пользоваться так: то, что различается по стендам (`DEPLOY_KEY`), — в Environment; то, что общее для
+всего репозитория (обычно `PAT_TOKEN`), — в секретах репозитория.
+
+Механика: джобы этого workflow объявляют `environment`, а
+[по документации GitHub](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)
+Environment-секрет вызванного workflow перекрывает секрет, переданный вызывающим. Значение из
+секретов репозитория попадает внутрь через блок `secrets:` шаблона.
+
+> **Новый секрет — правка двух файлов.** Шаблон перечисляет секреты поимённо (`secrets: inherit`
+> не используется), поэтому секрет надо объявить в `on.workflow_call.secrets` этого workflow **и**
+> добавить в блок `secrets:` шаблона. Если шаблон передаёт секрет, не объявленный здесь, запуск
+> падает с `Invalid input, <NAME> is not defined in the referenced workflow`.
 
 ---
 

@@ -20,7 +20,8 @@ permissions:
 jobs:
   grabber:
     uses: cat-of-summer/git_toolkit/.github/workflows/grabber.yml@main
-    secrets: inherit
+    secrets:
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
     with:
       commits: ${{ inputs.commits }}
       deploy_mirror: ${{ inputs.deploy_mirror }}

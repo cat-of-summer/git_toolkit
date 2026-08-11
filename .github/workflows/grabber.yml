@@ -25,6 +25,9 @@ on:
         required: false
         type: string
         default: 'false'
+    secrets:
+      DEPLOY_KEY:
+        required: false
 
 permissions:
   contents: write

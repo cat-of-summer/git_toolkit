@@ -10,4 +10,3 @@ permissions:
 jobs:
   minifier:
     uses: cat-of-summer/git_toolkit/.github/workflows/minifier.yml@main
-    secrets: inherit

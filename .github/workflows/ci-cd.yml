@@ -96,7 +96,13 @@ on:
         type: string
         default: 'false'
     secrets:
+      DEPLOY_KEY:
+        required: false
+      DOCKER_TOKEN:
+        required: false
       PAT_TOKEN:
+        required: false
+      PACKAGIST_API_TOKEN:
         required: false
 
 permissions:
