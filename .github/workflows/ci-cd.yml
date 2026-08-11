@@ -79,7 +79,6 @@ on:
         type: string
         default: ''
       publish_method:
-        # workflow_call does not support type: choice — allowed values: '', npm, docker, packagist
         description: "Override PUBLISH_METHOD ('' | npm | docker | packagist)"
         required: false
         type: string
@@ -90,7 +89,6 @@ on:
         type: string
         default: ''
       deploy_mirror:
-        # workflow_call does not support type: choice — allowed values: false, true, full
         description: 'Keep all:false; delete files removed in commits:true; mirror sync (deletes untracked):full'
         required: false
         type: string
@@ -540,7 +538,8 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
-          eval "$BUILD_COMMAND"
+
+          eval "${BUILD_COMMAND//$'\r'/}"
 
       - name: Run CI command
         if: ${{ env.CI_COMMAND != '' }}
@@ -550,7 +549,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
-          eval "$CI_COMMAND"
+          eval "${CI_COMMAND//$'\r'/}"
 
       - name: Upload workspace
         uses: actions/upload-artifact@v4
@@ -601,7 +600,7 @@ jobs:
           mkdir -p "$out"
 
           set -f
-          patterns=( ${RELEASE_FILES//,/ } )
+          patterns=( ${RELEASE_FILES//[,$'\r']/ } )
           set +f
 
           staged=()
@@ -1104,7 +1103,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
-          eval "$BUILD_COMMAND"
+          eval "${BUILD_COMMAND//$'\r'/}"
 
       - name: Cache lftp
         if: ${{ env.DEPLOY_METHOD == 'FTP' }}
@@ -1206,7 +1205,7 @@ jobs:
 
           ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "
             cd $DEPLOY_PATH
-            $BEFORE_DEPLOY_COMMAND
+            ${BEFORE_DEPLOY_COMMAND//$'\r'/}
           "
 
       - name: FTP deploy (full mirror)
@@ -1574,7 +1573,7 @@ jobs:
 
           ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "
             cd $DEPLOY_PATH
-            $AFTER_DEPLOY_COMMAND
+            ${AFTER_DEPLOY_COMMAND//$'\r'/}
           "
 
       - name: Cleanup SSH key
