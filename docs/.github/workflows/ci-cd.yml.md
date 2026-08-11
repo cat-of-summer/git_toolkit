@@ -16,13 +16,19 @@
    например `main`).
 3. Задай в этом Environment переменные. Минимум для «просто прогонять тесты»:
    ```
-   ACTION_TRIGGER=PUSH
+   ACTION_TRIGGER=push
    CI_COMMAND=npm test
    ```
 4. Запушь — workflow запустится сам.
 
 Любая незаданная переменная просто выключает свой шаг, а джоба становится **серой (skipped)**, а не
 красной. Красный статус = реальная ошибка команды.
+
+**Регистр значений.** Все перечисления и булевы (`ACTION_TRIGGER`, `DEPLOY_METHOD`, `DEPLOY_MIRROR`,
+`PUBLISH_METHOD`, `MULTIPLE_PACKAGES`, `DEPLOY_LAST_COMMITS`) разбираются регистронезависимо:
+`push`, `PUSH` и `Push` — одно и то же. В документации везде используется нижний регистр, его же
+стоит писать в настройках. Регистр значим у путей, хостов, glob'ов, `RUNS_ON` и `TOOLCHAIN` —
+их не трогаем.
 
 ---
 
@@ -57,17 +63,17 @@
 
 | Переменная | По умолчанию | Значения / смысл |
 |---|---|---|
-| `ACTION_TRIGGER` | `WORKFLOW_DISPATCH` | Когда пайплайн «активен»: `WORKFLOW_DISPATCH` / `PUSH` / `RELEASE`. Любое другое значение — ошибка. Устаревшее `DISPATCH` принимается с предупреждением |
+| `ACTION_TRIGGER` | `workflow_dispatch` | Когда пайплайн «активен»: `workflow_dispatch` / `push` / `release`. Любое другое значение — ошибка. Устаревшее `dispatch` принимается с предупреждением |
 
 | `ACTION_TRIGGER` | Событие | ci | release | cd |
 |---|---|:--:|:--:|:--:|
-| `WORKFLOW_DISPATCH` (по умолчанию) | push ветки/тега | — | — | — |
-| `WORKFLOW_DISPATCH` | ручной запуск на ветке | ✔ | — | ✔ |
-| `WORKFLOW_DISPATCH` | ручной запуск на теге | ✔ | ✔ | ✔ |
-| `PUSH` | push ветки | ✔ | — | ✔ |
-| `PUSH` | push тега | ✔ | ✔ | ✔ |
-| `RELEASE` | push ветки | — | — | — |
-| `RELEASE` | push тега | ✔ | ✔ | ✔ |
+| `workflow_dispatch` (по умолчанию) | push ветки/тега | — | — | — |
+| `workflow_dispatch` | ручной запуск на ветке | ✔ | — | ✔ |
+| `workflow_dispatch` | ручной запуск на теге | ✔ | ✔ | ✔ |
+| `push` | push ветки | ✔ | — | ✔ |
+| `push` | push тега | ✔ | ✔ | ✔ |
+| `release` | push ветки | — | — | — |
+| `release` | push тега | ✔ | ✔ | ✔ |
 | любой | pull request | ✔ | — | — |
 
 Дополнительные условия поверх таблицы:
@@ -149,7 +155,7 @@ Actions → **ci/cd** → **Run workflow**. В **Use workflow from** выбир�
 
 | Переменная | По умолчанию | Смысл |
 |---|---|---|
-| `DEPLOY_METHOD` | `COMMAND` | `COMMAND` / `FTP` / `RSYNC` / `GIT` — см. раздел про режимы |
+| `DEPLOY_METHOD` | `command` | `command` / `ftp` / `rsync` / `git` — см. раздел про режимы. Другое значение → джоба `cd` падает с явной ошибкой |
 | `DEPLOY_HOST` | — | Хост сервера. **Обязателен для деплоя** |
 | `DEPLOY_USER` | — | Пользователь. **Обязателен** |
 | `DEPLOY_PATH` | — | Каталог на сервере. **Обязателен** |
@@ -157,21 +163,54 @@ Actions → **ci/cd** → **Run workflow**. В **Use workflow from** выбир�
 | `DEPLOY_LOCAL_DIR` | `./` | Локальный каталог-источник: что именно заливать |
 | `DEPLOY_MIRROR` | `false` | `false` / `true` / `full` — см. ниже. ⚠️ через workflow-шаблон эта переменная не действует, см. «Особые случаи» |
 | `DEPLOY_LAST_COMMITS` | `false` | `true` → на push деплоить только файлы этого push (выборочный режим) |
-| `BEFORE_DEPLOY_COMMAND` | пусто | Команда по SSH **до** деплоя. Не выполняется при `DEPLOY_METHOD=FTP`. Пример: `php artisan down` |
-| `AFTER_DEPLOY_COMMAND` | пусто | Команда по SSH **после** деплоя. Не выполняется при `DEPLOY_METHOD=FTP`. Пример: `docker compose pull && docker compose up -d` |
+| `BEFORE_DEPLOY_COMMAND` | пусто | Команда по SSH **до** деплоя. Не выполняется при `DEPLOY_METHOD=ftp`. Пример: `php artisan down` |
+| `AFTER_DEPLOY_COMMAND` | пусто | Команда по SSH **после** деплоя. Не выполняется при `DEPLOY_METHOD=ftp`. Пример: `docker compose pull && docker compose up -d` |
+
+Обе команды выполняются на сервере в `bash`, скрипт передаётся по stdin (а не аргументом `ssh`,
+иначе токены были бы видны в `ps` на сервере). В них доступны `$GH_TOKEN` и `$PAT_TOKEN` — см.
+«Токены в пользовательских командах».
 
 ### Секреты
 
 | Секрет | Где нужен | Смысл |
 |---|---|---|
 | `GITHUB_TOKEN` | всегда | Встроенный, задавать и передавать не надо. Release, GitHub Packages, `ghcr.io` |
-| `DEPLOY_KEY` | cd | Приватный SSH-ключ; для `DEPLOY_METHOD=FTP` — пароль |
+| `DEPLOY_KEY` | cd | Приватный SSH-ключ; для `DEPLOY_METHOD=ftp` — пароль |
 | `DOCKER_TOKEN` | docker | Пароль реестра (для `ghcr.io` не нужен — подставится `GITHUB_TOKEN`) |
-| `PAT_TOKEN` | docker | Пробрасывается в образ как build-arg `GH_TOKEN` (если на сборке нужен приватный доступ) |
+| `PAT_TOKEN` | пользовательские команды | Personal Access Token для доступа к **чужим** приватным репозиториям. Доходит до `BUILD_COMMAND`, `CI_COMMAND`, `BEFORE_/AFTER_DEPLOY_COMMAND` и docker-сборки |
 | `PACKAGIST_API_TOKEN` | packagist | Токен Packagist; для **первой** публикации нужен MAIN-токен |
 
 > Токен npmjs **не нужен**: публикация идёт через OIDC trusted publishing. В GitHub Packages
 > публикация идёт под `GITHUB_TOKEN`. То есть для npm секретов не требуется вообще.
+
+### Токены в пользовательских командах
+
+Везде, где выполняется заданная тобой команда, доступны **две** переменные с разными правами:
+
+| Переменная | Что внутри | Права |
+|---|---|---|
+| `GH_TOKEN` | встроенный `GITHUB_TOKEN`, есть всегда | Только **текущий** репозиторий. В джобе `cd` — на чтение |
+| `PAT_TOKEN` | секрет `PAT_TOKEN`, если задан; иначе пусто | Столько, сколько выдано токену — в том числе чужие приватные репозитории |
+
+Имя `GH_TOKEN` выбрано не случайно: его читает `gh` CLI, поэтому `gh release list` и подобное
+работают без настройки. Для приватных зависимостей из другого репозитория встроенного токена не
+хватит — там нужен `PAT_TOKEN`:
+
+```
+BUILD_COMMAND=git config --global url."https://x-access-token:$PAT_TOKEN@github.com/".insteadOf "https://github.com/" && go mod download
+```
+
+Где доступны: `BUILD_COMMAND` и `CI_COMMAND` (джоба `ci`), `BUILD_COMMAND` в выборочном режиме
+(джоба `cd`), `BEFORE_/AFTER_DEPLOY_COMMAND` (на сервере), а также сборка образа — там оба приходят
+build-arg'ами.
+
+> ⚠️ **Изменение поведения.** Раньше `GH_TOKEN` содержал значение секрета `PAT_TOKEN` — одно имя
+> означало разные токены на разных шагах. Теперь имена разведены. Если в твоих командах `$GH_TOKEN`
+> использовался ради доступа к чужому приватному репозиторию — замени его на `$PAT_TOKEN`, иначе
+> получишь `404`. В `BEFORE_/AFTER_DEPLOY_COMMAND` токенов раньше не было вовсе, там ломаться нечему.
+
+Значение секрета GitHub маскирует в логах по самому значению, а не по имени переменной, — так что
+переименование ни на маскировку, ни на безопасность не влияет.
 
 ### Где хранить: Environment или секреты репозитория
 
@@ -299,8 +338,11 @@ environment оставить пустым.
 | `…:<ветка>` | только при `MULTIPLE_PACKAGES=false` |
 
 Имя образа приводится к нижнему регистру. Платформа фиксирована: `linux/amd64`.
-В сборку всегда передаются build-args `GH_TOKEN` (из секрета `PAT_TOKEN`), `VERSION` (короткий SHA)
-и `ENVIRONMENT` (имя окружения); `DOCKER_BUILD_ARGS` добавляется сверху.
+В сборку всегда передаются build-args `GH_TOKEN` (встроенный `GITHUB_TOKEN`), `PAT_TOKEN` (секрет,
+если задан), `VERSION` (короткий SHA) и `ENVIRONMENT` (имя окружения); `DOCKER_BUILD_ARGS`
+добавляется сверху. Чтобы воспользоваться токеном внутри Dockerfile, его надо объявить:
+`ARG PAT_TOKEN`. Учти, что значение build-arg остаётся в истории слоёв образа, — для приватных
+зависимостей лучше многоступенчатая сборка, где токен живёт только в промежуточной стадии.
 
 ```
 PUBLISH_METHOD=docker
@@ -327,10 +369,13 @@ PACKAGIST_USERNAME=<user>
 
 | Значение | Что делает |
 |---|---|
-| `COMMAND` (по умолчанию) | Файлы **не передаются**. Выполняются только `BEFORE_/AFTER_DEPLOY_COMMAND` по SSH. `DEPLOY_KEY` всё равно обязателен |
-| `RSYNC` | Заливка по rsync поверх SSH, с 3 повторами при сбое |
-| `FTP` | Заливка через lftp; при сбое пакетной операции — повтор пофайлово. `BEFORE_/AFTER_DEPLOY_COMMAND` **не выполняются** |
-| `GIT` | Сервер сам делает `clone` / `pull`. Требует доступа сервера к репозиторию по SSH (`git@github.com:…`) |
+| `command` (по умолчанию) | Файлы **не передаются**. Выполняются только `BEFORE_/AFTER_DEPLOY_COMMAND` по SSH. `DEPLOY_KEY` всё равно обязателен |
+| `rsync` | Заливка по rsync поверх SSH, с 3 повторами при сбое |
+| `ftp` | Заливка через lftp; при сбое пакетной операции — повтор пофайлово. `BEFORE_/AFTER_DEPLOY_COMMAND` **не выполняются** |
+| `git` | Сервер сам делает `clone` / `pull`. Требует доступа сервера к репозиторию по SSH (`git@github.com:…`) |
+
+Значение вне этого списка — не «ничего не делать», а ошибка: джоба `cd` падает с
+`Invalid DEPLOY_METHOD`.
 
 ### Что заливается (scope)
 
@@ -338,7 +383,7 @@ PACKAGIST_USERNAME=<user>
 
 | Условие | Что заливается |
 |---|---|
-| `DEPLOY_METHOD=COMMAND` | ничего, только SSH-команды |
+| `DEPLOY_METHOD=command` | ничего, только SSH-команды |
 | push тега; push при `DEPLOY_LAST_COMMITS=false`; ручной запуск без `commits` | **полный** — весь `DEPLOY_LOCAL_DIR` |
 | push при `DEPLOY_LAST_COMMITS=true`; ручной запуск с `commits` | **выборочный** — только файлы, затронутые в этих коммитах |
 
@@ -350,7 +395,7 @@ PACKAGIST_USERNAME=<user>
 | `true` | ничего не удаляется | удаляются файлы, убранные в задеплоенных коммитах |
 | `full` | точное зеркало: **всё лишнее на сервере удаляется** | ❌ запрещено, джоба падает |
 
-Для `DEPLOY_METHOD=GIT` значение `full` означает `fetch` + `reset --hard`: любые локальные правки
+Для `DEPLOY_METHOD=git` значение `full` означает `fetch` + `reset --hard`: любые локальные правки
 на сервере будут затёрты. Остальные значения — обычный `git pull`.
 
 ### Что никогда не передаётся
@@ -378,10 +423,12 @@ PACKAGIST_USERNAME=<user>
 
 **Запрещённые сочетания** — джоба падает с явным сообщением:
 
-- `DEPLOY_METHOD=GIT` + выборочный режим: `GIT` тянет ветку целиком, а не подмножество файлов.
+- `DEPLOY_METHOD=git` + выборочный режим: `git` тянет ветку целиком, а не подмножество файлов.
 - `DEPLOY_MIRROR=full` + выборочный режим: `full` — это зеркало всего дерева. Для удаления файлов,
   убранных в задеплоенных коммитах, есть `DEPLOY_MIRROR=true`.
 - `DEPLOY_MIRROR` со значением вне `false | true | full`.
+- `DEPLOY_METHOD` со значением вне `command | rsync | ftp | git` — проверяется в `resolve-config`,
+  и только когда деплой вообще запускается.
 
 **Release создаётся всегда**, когда `run_release=true` — даже при пустом `RELEASE_FILES`
 (просто без ассетов). Но если `RELEASE_FILES` задан и ни один glob ничего не нашёл — джоба падает.
@@ -403,11 +450,11 @@ dist/windows/app.exe  →  windows__app.exe
 
 **Тесты + автодеплой по rsync на каждый push:**
 ```
-ACTION_TRIGGER=PUSH
+ACTION_TRIGGER=push
 TOOLCHAIN=node:24
 BUILD_COMMAND=npm ci && npm run build
 CI_COMMAND=npm test
-DEPLOY_METHOD=RSYNC
+DEPLOY_METHOD=rsync
 DEPLOY_HOST=example.com
 DEPLOY_USER=deploy
 DEPLOY_PATH=/var/www/project
@@ -418,7 +465,7 @@ AFTER_DEPLOY_COMMAND=php artisan migrate && php artisan up
 
 **Бинарники Linux + Windows в Release:**
 ```
-ACTION_TRIGGER=RELEASE
+ACTION_TRIGGER=release
 RUNS_ON=ubuntu-latest,windows-latest
 TOOLCHAIN=python:3.12
 BUILD_COMMAND=pip install pyinstaller && pyinstaller --onefile --name "app-$RUNNER_OS" main.py
@@ -427,11 +474,11 @@ RELEASE_FILES=dist/app-*
 
 **Docker-образ из собранного + деплой командой:**
 ```
-ACTION_TRIGGER=RELEASE
+ACTION_TRIGGER=release
 TOOLCHAIN=node:24
 BUILD_COMMAND=npm ci && npm run build
 PUBLISH_METHOD=docker
-DEPLOY_METHOD=COMMAND
+DEPLOY_METHOD=command
 DEPLOY_HOST=example.com
 DEPLOY_USER=deploy
 DEPLOY_PATH=/srv/app
@@ -441,7 +488,7 @@ AFTER_DEPLOY_COMMAND=docker compose pull && docker compose up -d
 
 **Только релиз с публикацией в npm (без деплоя):**
 ```
-ACTION_TRIGGER=RELEASE
+ACTION_TRIGGER=release
 TOOLCHAIN=node:24
 BUILD_COMMAND=npm ci && npm run build
 PUBLISH_METHOD=npm
@@ -455,7 +502,7 @@ PUBLISH_METHOD=npm
 - **Всё серое.** Смотри лог джобы `resolve-config`: там печатаются `ACTION_TRIGGER`, событие и
   итоговые `run_ci / run_release / run_cd`. Чаще всего `ACTION_TRIGGER` не тот.
 - **`ci` серая.** Не заданы ни `BUILD_COMMAND`, ни `CI_COMMAND`.
-- **`cd` серая при `ACTION_TRIGGER=PUSH`.** Заданы не все из `DEPLOY_HOST` / `DEPLOY_USER` /
+- **`cd` серая при `ACTION_TRIGGER=push`.** Заданы не все из `DEPLOY_HOST` / `DEPLOY_USER` /
   `DEPLOY_PATH` + секрет `DEPLOY_KEY`.
 - **Переменные не подхватываются.** Они заданы не в том Environment: имя окружения печатается в
   логе `resolve-branch` (`Environment resolved to: …`).
@@ -468,8 +515,10 @@ PUBLISH_METHOD=npm
   `cd`; результаты сборки деплоятся только в полном режиме.
 - **Зеркалирование не сработало.** См. «Особые случаи»: `vars.DEPLOY_MIRROR` не действует при вызове
   через шаблон.
-- **`BEFORE_/AFTER_DEPLOY_COMMAND` не выполнились.** Стоит `DEPLOY_METHOD=FTP` — для него эти шаги
+- **`BEFORE_/AFTER_DEPLOY_COMMAND` не выполнились.** Стоит `DEPLOY_METHOD=ftp` — для него эти шаги
   отключены.
+- **`404` на приватный репозиторий в `BUILD_COMMAND`.** Взят `$GH_TOKEN` — он видит только текущий
+  репозиторий. Для чужих нужен `$PAT_TOKEN`, см. «Токены в пользовательских командах».
 - **PR не разблокируется.** При нескольких ОС имя чека — `ci (ubuntu-latest)`, а не `ci`; обнови
   требуемые чеки в branch protection.
 - **npm `401` (GitHub Packages).** Имя пакета должно быть scoped и совпадать с владельцем; в

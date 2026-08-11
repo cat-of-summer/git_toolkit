@@ -130,6 +130,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          MULTIPLE_PACKAGES="$(printf '%s' "${MULTIPLE_PACKAGES:-}" | tr '[:upper:]' '[:lower:]')"
+
           if [ "$REF_TYPE" != "tag" ]; then
             echo "Ref '$REF_NAME' is not a tag — the release part of the pipeline does not apply."
             {
@@ -198,6 +200,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          MULTIPLE_PACKAGES="$(printf '%s' "${MULTIPLE_PACKAGES:-}" | tr '[:upper:]' '[:lower:]')"
+
           if [ -n "${INPUT_ENVIRONMENT:-}" ]; then
             REAL_BRANCH="$INPUT_ENVIRONMENT"
             echo "Environment overridden by the workflow_dispatch input."
@@ -241,16 +245,19 @@ jobs:
       commits: ${{ steps.decide.outputs.commits }}
       os_json: ${{ steps.decide.outputs.os_json }}
       publish_method: ${{ steps.decide.outputs.publish_method }}
+      deploy_method: ${{ steps.decide.outputs.deploy_method }}
+      deploy_mirror: ${{ steps.decide.outputs.deploy_mirror }}
 
     env:
-      ACTION_TRIGGER: ${{ vars.ACTION_TRIGGER || 'WORKFLOW_DISPATCH' }}
+      ACTION_TRIGGER: ${{ vars.ACTION_TRIGGER || 'workflow_dispatch' }}
       BUILD_COMMAND: ${{ vars.BUILD_COMMAND }}
       CI_COMMAND: ${{ vars.CI_COMMAND }}
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
       DEPLOY_USER: ${{ vars.DEPLOY_USER }}
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
       DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-      DEPLOY_METHOD: ${{ vars.DEPLOY_METHOD || 'COMMAND' }}
+      DEPLOY_METHOD: ${{ vars.DEPLOY_METHOD || 'command' }}
+      DEPLOY_MIRROR: ${{ inputs.deploy_mirror || vars.DEPLOY_MIRROR || 'false' }}
       DEPLOY_LAST_COMMITS: ${{ vars.DEPLOY_LAST_COMMITS || 'false' }}
 
     steps:
@@ -270,14 +277,21 @@ jobs:
         run: |
           set -euo pipefail
 
+          lower() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
+          ACTION_TRIGGER="$(lower "$ACTION_TRIGGER")"
+          DEPLOY_METHOD="$(lower "$DEPLOY_METHOD")"
+          DEPLOY_MIRROR="$(lower "$DEPLOY_MIRROR")"
+          DEPLOY_LAST_COMMITS="$(lower "$DEPLOY_LAST_COMMITS")"
+          PUBLISH_METHOD="$(lower "${PUBLISH_METHOD:-}")"
+
           case "$ACTION_TRIGGER" in
-            DISPATCH)
-              echo "::warning::ACTION_TRIGGER=DISPATCH is deprecated — rename the value to WORKFLOW_DISPATCH."
-              ACTION_TRIGGER=WORKFLOW_DISPATCH
+            dispatch)
+              echo "::warning::ACTION_TRIGGER=dispatch is deprecated — rename the value to workflow_dispatch."
+              ACTION_TRIGGER=workflow_dispatch
               ;;
-            WORKFLOW_DISPATCH|PUSH|RELEASE) ;;
+            workflow_dispatch|push|release) ;;
             *)
-              echo "::error::Invalid ACTION_TRIGGER='$ACTION_TRIGGER'. Allowed: WORKFLOW_DISPATCH | PUSH | RELEASE." >&2
+              echo "::error::Invalid ACTION_TRIGGER='$ACTION_TRIGGER'. Allowed: workflow_dispatch | push | release." >&2
               exit 1
               ;;
           esac
@@ -289,9 +303,9 @@ jobs:
             pull_request)      PR=true ;;
             push)
               if [ "$IS_TAG" = "true" ]; then
-                case "$ACTION_TRIGGER" in PUSH|RELEASE) ACTIVE=true ;; esac
+                case "$ACTION_TRIGGER" in push|release) ACTIVE=true ;; esac
               else
-                if [ "$ACTION_TRIGGER" = "PUSH" ]; then ACTIVE=true; fi
+                if [ "$ACTION_TRIGGER" = "push" ]; then ACTIVE=true; fi
               fi
               ;;
           esac
@@ -318,7 +332,15 @@ jobs:
           SCOPE=""
           COMMITS=""
           if [ "$RUN_CD" = "true" ]; then
-            if [ "$DEPLOY_METHOD" = "COMMAND" ]; then
+            case "$DEPLOY_METHOD" in
+              command|rsync|ftp|git) ;;
+              *)
+                echo "::error::Invalid DEPLOY_METHOD='$DEPLOY_METHOD'. Allowed: command | rsync | ftp | git." >&2
+                exit 1
+                ;;
+            esac
+
+            if [ "$DEPLOY_METHOD" = "command" ]; then
               SCOPE="none"
             elif [ "$EVENT" = "workflow_dispatch" ]; then
               if [ -z "$INPUT_COMMITS" ]; then
@@ -358,7 +380,7 @@ jobs:
 
           echo "ACTION_TRIGGER=$ACTION_TRIGGER event=$EVENT is_tag=$IS_TAG active=$ACTIVE pr=$PR"
           echo "run_ci=$RUN_CI run_release=$RUN_RELEASE run_cd=$RUN_CD"
-          echo "method=$DEPLOY_METHOD scope=$SCOPE os=$OS_JSON publish=${PUBLISH_METHOD:-<none>}"
+          echo "method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR scope=$SCOPE os=$OS_JSON publish=${PUBLISH_METHOD:-<none>}"
           {
             echo "run_ci=$RUN_CI"
             echo "run_release=$RUN_RELEASE"
@@ -367,6 +389,8 @@ jobs:
             echo "commits=$COMMITS"
             echo "os_json=$OS_JSON"
             echo "publish_method=${PUBLISH_METHOD:-}"
+            echo "deploy_method=$DEPLOY_METHOD"
+            echo "deploy_mirror=$DEPLOY_MIRROR"
           } >> "$GITHUB_OUTPUT"
 
   ci:
@@ -535,7 +559,8 @@ jobs:
         shell: bash
         env:
           MATRIX_OS: ${{ matrix.os }}
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -546,7 +571,8 @@ jobs:
         shell: bash
         env:
           MATRIX_OS: ${{ matrix.os }}
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
           eval "${CI_COMMAND//$'\r'/}"
@@ -875,7 +901,8 @@ jobs:
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
-            GH_TOKEN=${{ secrets.PAT_TOKEN }}
+            GH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+            PAT_TOKEN=${{ secrets.PAT_TOKEN }}
             VERSION=${{ steps.meta.outputs.sha_short }}
             ENVIRONMENT=${{ needs.resolve-branch.outputs.environment }}
             ${{ vars.DOCKER_BUILD_ARGS }}
@@ -946,9 +973,9 @@ jobs:
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
       DEPLOY_LOCAL_DIR: ${{ vars.DEPLOY_LOCAL_DIR || './' }}
       DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-      DEPLOY_MIRROR: ${{ inputs.deploy_mirror || vars.DEPLOY_MIRROR || 'false' }}
+      DEPLOY_MIRROR: ${{ needs.resolve-config.outputs.deploy_mirror }}
       DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
-      DEPLOY_METHOD: ${{ vars.DEPLOY_METHOD || 'COMMAND' }}
+      DEPLOY_METHOD: ${{ needs.resolve-config.outputs.deploy_method }}
       BUILD_COMMAND: ${{ vars.BUILD_COMMAND }}
       BEFORE_DEPLOY_COMMAND: ${{ vars.BEFORE_DEPLOY_COMMAND }}
       AFTER_DEPLOY_COMMAND: ${{ vars.AFTER_DEPLOY_COMMAND }}
@@ -961,8 +988,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$SCOPE" = "selective" ] && [ "$DEPLOY_METHOD" = "GIT" ]; then
-            echo "::error::DEPLOY_METHOD=GIT is not supported in selective mode (workflow_dispatch with commits or DEPLOY_LAST_COMMITS=true). GIT deploys the whole branch, not a file subset."
+          if [ "$SCOPE" = "selective" ] && [ "$DEPLOY_METHOD" = "git" ]; then
+            echo "::error::DEPLOY_METHOD=git is not supported in selective mode (workflow_dispatch with commits or DEPLOY_LAST_COMMITS=true). git deploys the whole branch, not a file subset."
             exit 1
           fi
           case "$DEPLOY_MIRROR" in
@@ -979,7 +1006,7 @@ jobs:
           echo "Resolved: method=$DEPLOY_METHOD scope=$SCOPE mirror=$DEPLOY_MIRROR commits='$COMMITS'"
 
       - name: Setup SSH key
-        if: ${{ env.DEPLOY_METHOD == 'RSYNC' || env.DEPLOY_METHOD == 'GIT' || env.DEPLOY_METHOD == 'COMMAND' }}
+        if: ${{ env.DEPLOY_METHOD == 'rsync' || env.DEPLOY_METHOD == 'git' || env.DEPLOY_METHOD == 'command' }}
         shell: bash
         run: |
           TMP_KEY=$(mktemp)
@@ -1100,13 +1127,14 @@ jobs:
         if: ${{ env.SCOPE == 'selective' && env.BUILD_COMMAND != '' }}
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
           eval "${BUILD_COMMAND//$'\r'/}"
 
       - name: Cache lftp
-        if: ${{ env.DEPLOY_METHOD == 'FTP' }}
+        if: ${{ env.DEPLOY_METHOD == 'ftp' }}
         id: cache-lftp
         uses: actions/cache@v4
         with:
@@ -1114,7 +1142,7 @@ jobs:
           key: ${{ runner.os }}-apt-lftp-v2
 
       - name: Keep apt packages for caching
-        if: ${{ env.DEPLOY_METHOD == 'FTP' }}
+        if: ${{ env.DEPLOY_METHOD == 'ftp' }}
         shell: bash
         run: echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99keep-cache >/dev/null
 
@@ -1198,18 +1226,24 @@ jobs:
           echo "--- Files to delete: $(wc -l < "$RUNNER_TEMP/files_delete.txt") ---"
 
       - name: Before deploy command
-        if: ${{ env.BEFORE_DEPLOY_COMMAND != '' && env.DEPLOY_METHOD != 'FTP' }}
+        if: ${{ env.BEFORE_DEPLOY_COMMAND != '' && env.DEPLOY_METHOD != 'ftp' }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
 
-          ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "
-            cd $DEPLOY_PATH
-            ${BEFORE_DEPLOY_COMMAND//$'\r'/}
-          "
+          ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" bash -s <<REMOTE
+          set -e
+          export GH_TOKEN='$GH_TOKEN'
+          export PAT_TOKEN='$PAT_TOKEN'
+          cd $DEPLOY_PATH
+          ${BEFORE_DEPLOY_COMMAND//$'\r'/}
+          REMOTE
 
       - name: FTP deploy (full mirror)
-        if: ${{ env.DEPLOY_METHOD == 'FTP' && env.SCOPE == 'full' }}
+        if: ${{ env.DEPLOY_METHOD == 'ftp' && env.SCOPE == 'full' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1312,7 +1346,7 @@ jobs:
           fi
 
       - name: FTP deploy (selective)
-        if: ${{ env.DEPLOY_METHOD == 'FTP' && env.SCOPE == 'selective' }}
+        if: ${{ env.DEPLOY_METHOD == 'ftp' && env.SCOPE == 'selective' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1454,7 +1488,7 @@ jobs:
           fi
 
       - name: RSYNC deploy (full)
-        if: ${{ env.DEPLOY_METHOD == 'RSYNC' && env.SCOPE == 'full' }}
+        if: ${{ env.DEPLOY_METHOD == 'rsync' && env.SCOPE == 'full' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1491,7 +1525,7 @@ jobs:
             "$DEPLOY_LOCAL_DIR/" "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH"
 
       - name: RSYNC deploy (selective)
-        if: ${{ env.DEPLOY_METHOD == 'RSYNC' && env.SCOPE == 'selective' }}
+        if: ${{ env.DEPLOY_METHOD == 'rsync' && env.SCOPE == 'selective' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1544,7 +1578,7 @@ jobs:
           fi
 
       - name: GIT deploy
-        if: ${{ env.DEPLOY_METHOD == 'GIT' }}
+        if: ${{ env.DEPLOY_METHOD == 'git' }}
         env:
           GITHUB_REF_NAME: ${{ github.ref_name }}
         shell: bash
@@ -1566,15 +1600,21 @@ jobs:
           "
 
       - name: After deploy command
-        if: ${{ env.AFTER_DEPLOY_COMMAND != '' && env.DEPLOY_METHOD != 'FTP' }}
+        if: ${{ env.AFTER_DEPLOY_COMMAND != '' && env.DEPLOY_METHOD != 'ftp' }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
 
-          ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "
-            cd $DEPLOY_PATH
-            ${AFTER_DEPLOY_COMMAND//$'\r'/}
-          "
+          ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" bash -s <<REMOTE
+          set -e
+          export GH_TOKEN='$GH_TOKEN'
+          export PAT_TOKEN='$PAT_TOKEN'
+          cd $DEPLOY_PATH
+          ${AFTER_DEPLOY_COMMAND//$'\r'/}
+          REMOTE
 
       - name: Cleanup SSH key
         if: always()

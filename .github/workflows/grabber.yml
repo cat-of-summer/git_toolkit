@@ -45,11 +45,35 @@ jobs:
       DEPLOY_LOCAL_DIR: ${{ vars.DEPLOY_LOCAL_DIR || './' }}
       DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
       DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
-      DEPLOY_METHOD: ${{ vars.DEPLOY_METHOD }}
-      DEPLOY_MIRROR: ${{ inputs.deploy_mirror || 'false' }}
       COMMITS: ${{ inputs.commits || '' }}
 
     steps:
+      - name: Normalize config
+        shell: bash
+        env:
+          DEPLOY_METHOD_RAW: ${{ vars.DEPLOY_METHOD }}
+          DEPLOY_MIRROR_RAW: ${{ inputs.deploy_mirror || 'false' }}
+        run: |
+          set -euo pipefail
+
+          lower() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
+          DEPLOY_METHOD="$(lower "$DEPLOY_METHOD_RAW")"
+          DEPLOY_MIRROR="$(lower "$DEPLOY_MIRROR_RAW")"
+
+          case "$DEPLOY_METHOD" in
+            rsync|ftp) ;;
+            *)
+              echo "::error::grabber supports only DEPLOY_METHOD=rsync | ftp (got '$DEPLOY_METHOD'). Downloading from the server has no meaning for command or git." >&2
+              exit 1
+              ;;
+          esac
+
+          echo "method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR"
+          {
+            echo "DEPLOY_METHOD=$DEPLOY_METHOD"
+            echo "DEPLOY_MIRROR=$DEPLOY_MIRROR"
+          } >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -154,7 +178,7 @@ jobs:
           fi
 
       - name: Setup ssh key
-        if: ${{ env.DEPLOY_METHOD == 'RSYNC' }}
+        if: ${{ env.DEPLOY_METHOD == 'rsync' }}
         shell: bash
         run: |
           TMP_KEY=$(mktemp)
@@ -163,7 +187,7 @@ jobs:
           echo "TMP_KEY=$TMP_KEY" >> "$GITHUB_ENV"
 
       - name: Cache lftp
-        if: ${{ env.DEPLOY_METHOD == 'FTP' }}
+        if: ${{ env.DEPLOY_METHOD == 'ftp' }}
         id: cache-lftp
         uses: actions/cache@v4
         with:
@@ -171,12 +195,12 @@ jobs:
           key: ${{ runner.os }}-apt-lftp-v2
 
       - name: Keep apt packages for caching
-        if: ${{ env.DEPLOY_METHOD == 'FTP' }}
+        if: ${{ env.DEPLOY_METHOD == 'ftp' }}
         shell: bash
         run: echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99keep-cache >/dev/null
 
       - name: Install lftp
-        if: ${{ env.DEPLOY_METHOD == 'FTP' }}
+        if: ${{ env.DEPLOY_METHOD == 'ftp' }}
         shell: bash
         run: |
           if [ "${{ steps.cache-lftp.outputs.cache-hit }}" = "true" ] && ls /var/cache/apt/archives/lftp_*.deb &>/dev/null; then
@@ -197,7 +221,7 @@ jobs:
             > "$SERVER_FILES"
             DEPLOY_PATH_STRIPPED="${DEPLOY_PATH%/}"
 
-            if [ "$DEPLOY_METHOD" = "RSYNC" ]; then
+            if [ "$DEPLOY_METHOD" = "rsync" ]; then
               ssh -i "$TMP_KEY" \
                 -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 \
                 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
@@ -206,7 +230,7 @@ jobs:
                 "while IFS= read -r f; do test -f \"${DEPLOY_PATH_STRIPPED}/\$f\" && echo \"\$f\"; done" \
                 < "$TO_DOWNLOAD" > "$SERVER_FILES"
 
-            elif [ "$DEPLOY_METHOD" = "FTP" ]; then
+            elif [ "$DEPLOY_METHOD" = "ftp" ]; then
               cp "$TO_DOWNLOAD" "$SERVER_FILES"
             fi
 
@@ -222,7 +246,7 @@ jobs:
 
           SERVER_FILES="$RUNNER_TEMP/server_files.txt"
 
-          if [ "$DEPLOY_METHOD" = "RSYNC" ]; then
+          if [ "$DEPLOY_METHOD" = "rsync" ]; then
             ssh -i "$TMP_KEY" \
               -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 \
               -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
@@ -231,7 +255,7 @@ jobs:
               "find -L '$DEPLOY_PATH' -type f -printf '%P\n'" \
               | grep -vE '^\.git' > "$SERVER_FILES"
 
-          elif [ "$DEPLOY_METHOD" = "FTP" ]; then
+          elif [ "$DEPLOY_METHOD" = "ftp" ]; then
             touch "$RUNNER_TEMP/server_files_raw.txt"
             lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" <<LFTP > "$RUNNER_TEMP/server_files_raw.txt" &
           set net:timeout 30
@@ -303,7 +327,7 @@ jobs:
           fi
 
       - name: FTP Download
-        if: ${{ env.DEPLOY_METHOD == 'FTP' && env.NOTHING_TO_SYNC != 'true' }}
+        if: ${{ env.DEPLOY_METHOD == 'ftp' && env.NOTHING_TO_SYNC != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -379,7 +403,7 @@ jobs:
           fi
 
       - name: RSYNC Download
-        if: ${{ env.DEPLOY_METHOD == 'RSYNC' && env.NOTHING_TO_SYNC != 'true' }}
+        if: ${{ env.DEPLOY_METHOD == 'rsync' && env.NOTHING_TO_SYNC != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
