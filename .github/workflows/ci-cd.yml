@@ -537,6 +537,7 @@ jobs:
         shell: bash
         env:
           MATRIX_OS: ${{ matrix.os }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
           eval "$BUILD_COMMAND"
@@ -546,6 +547,7 @@ jobs:
         shell: bash
         env:
           MATRIX_OS: ${{ matrix.os }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
           eval "$CI_COMMAND"
@@ -1098,6 +1100,8 @@ jobs:
       - name: Build
         if: ${{ env.SCOPE == 'selective' && env.BUILD_COMMAND != '' }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
           eval "$BUILD_COMMAND"
