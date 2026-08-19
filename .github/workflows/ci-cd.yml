@@ -181,7 +181,7 @@ jobs:
 
       - name: Checkout
         if: ${{ steps.resolve.outputs.is_tag == 'true' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ steps.resolve.outputs.ref }}
@@ -416,7 +416,7 @@ jobs:
       CI_COMMAND: ${{ vars.CI_COMMAND }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-branch.outputs.is_tag == 'true' && needs.resolve-branch.outputs.ref || '' }}
           submodules: true
@@ -515,7 +515,7 @@ jobs:
 
       - name: Cache toolchain
         if: ${{ steps.tc.outputs.tools != '' }}
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.tc.outputs.mise_dir }}
           key: mise-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.mise.toml', '.tool-versions') }}-${{ steps.tc.outputs.tools }}
@@ -638,7 +638,7 @@ jobs:
           eval "${CI_COMMAND//$'\r'/}"
 
       - name: Upload workspace
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: workspace-${{ matrix.os }}
           path: |
@@ -668,13 +668,13 @@ jobs:
       RELEASE_FILES: ${{ vars.RELEASE_FILES }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-branch.outputs.ref }}
 
       - name: Download workspace from ci
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: workspace-*
           merge-multiple: true
@@ -728,7 +728,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.resolve-branch.outputs.ref }}
           name: ${{ needs.resolve-branch.outputs.pkg_suffix != '' && format('{0} release {1}', needs.resolve-branch.outputs.environment, needs.resolve-branch.outputs.tag) || format('Release {0}', needs.resolve-branch.outputs.tag) }}
@@ -750,13 +750,13 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-branch.outputs.ref }}
 
       - name: Download workspace from ci
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: workspace-*
           merge-multiple: true
@@ -785,9 +785,10 @@ jobs:
           fi
           echo "node=$node" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ steps.tc.outputs.node }}
+          package-manager-cache: false
 
       - name: Drop committed .npmrc
         shell: bash
@@ -823,11 +824,12 @@ jobs:
           npm pkg set name="${NAME}${SUFFIX}"
 
       - name: Setup Node for GitHub Packages
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ steps.tc.outputs.node }}
           registry-url: 'https://npm.pkg.github.com'
           scope: '@${{ github.repository_owner }}'
+          package-manager-cache: false
 
       - name: Publish to GitHub Packages
         id: gpr
@@ -855,11 +857,12 @@ jobs:
           fi
 
       - name: Setup Node for npmjs.org
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ steps.tc.outputs.node }}
           registry-url: 'https://registry.npmjs.org'
           scope: '@${{ github.repository_owner }}'
+          package-manager-cache: false
 
       - name: Ensure npm CLI supports trusted publishing
         shell: bash
@@ -898,13 +901,13 @@ jobs:
       BUILD_CONTEXT: ${{ vars.BUILD_CONTEXT || '.' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-branch.outputs.ref }}
 
       - name: Download workspace from ci
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: workspace-*
           merge-multiple: true
@@ -954,14 +957,14 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Login to registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.DOCKER_REGISTRY }}
           username: ${{ vars.DOCKER_USERNAME || github.actor }}
           password: ${{ secrets.DOCKER_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build & push image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ env.BUILD_CONTEXT }}
           file: ${{ env.DOCKERFILE_PATH }}
@@ -1191,7 +1194,7 @@ jobs:
 
       - name: Checkout
         if: ${{ env.SCOPE != 'none' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-branch.outputs.is_tag == 'true' && needs.resolve-branch.outputs.ref || github.ref_name }}
           fetch-depth: 0
@@ -1221,7 +1224,7 @@ jobs:
 
       - name: Download workspace from ci
         if: ${{ env.SCOPE == 'full' && env.RUN_CI == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: workspace-*
           merge-multiple: true
@@ -1314,7 +1317,7 @@ jobs:
       - name: Cache lftp
         if: ${{ env.DEPLOY_METHOD == 'ftp' }}
         id: cache-lftp
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /var/cache/apt/archives
           key: ${{ runner.os }}-apt-lftp-v2

@@ -74,7 +74,7 @@ jobs:
             echo "DEPLOY_MIRROR=$DEPLOY_MIRROR"
           } >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -189,7 +189,7 @@ jobs:
       - name: Cache lftp
         if: ${{ env.DEPLOY_METHOD == 'ftp' }}
         id: cache-lftp
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /var/cache/apt/archives
           key: ${{ runner.os }}-apt-lftp-v2
