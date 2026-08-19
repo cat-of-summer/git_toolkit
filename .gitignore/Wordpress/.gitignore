@@ -50,8 +50,6 @@ yarn-error.log*
 # PHP / Composer / vendor
 # ------------------------
 vendor/
-# If you manage dependencies with Composer in CI, commit composer.json/composer.lock only
-composer.lock
 composer.phar
 
 # ------------------------
