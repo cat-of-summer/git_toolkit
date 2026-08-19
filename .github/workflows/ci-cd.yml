@@ -102,6 +102,8 @@ on:
         required: false
       PACKAGIST_API_TOKEN:
         required: false
+      SECRETS_JSON:
+        required: false
 
 permissions:
   contents: write
@@ -419,6 +421,59 @@ jobs:
           ref: ${{ needs.resolve-branch.outputs.is_tag == 'true' && needs.resolve-branch.outputs.ref || '' }}
           submodules: true
 
+      - name: Collect vars & secrets
+        shell: bash
+        env:
+          VARS_JSON: ${{ toJSON(vars) }}
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          EXTRA_SECRETS: ${{ secrets.SECRETS_JSON }}
+        run: |
+          set -euo pipefail
+
+          tmp="$RUNNER_TEMP"
+          if command -v cygpath >/dev/null 2>&1; then tmp="$(cygpath -u "$RUNNER_TEMP")"; fi
+          CTX="$tmp/ctx_env.sh"
+          : > "$CTX"
+          chmod 600 "$CTX"
+
+          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token)$'
+
+          emit() {
+            local json="$1" mask="$2" label="$3"
+            local names="" k b64 v
+
+            if [ -z "$json" ] || [ "$json" = "null" ] || [ "$json" = "{}" ]; then
+              echo "$label: <none>"
+              return 0
+            fi
+            if ! printf '%s' "$json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+              echo "::error::$label is not a JSON object. Expected {\"NAME\":\"value\", ...}." >&2
+              exit 1
+            fi
+
+            while IFS='=' read -r k b64; do
+              [ -z "$k" ] && continue
+              case "$k" in [A-Za-z_][A-Za-z0-9_]*) ;; *) continue ;; esac
+              if printf '%s' "$k" | grep -qE "$DENY"; then continue; fi
+              v="$(printf '%s' "$b64" | base64 -d)"
+              if [ "$mask" = "mask" ] && [ -n "$v" ]; then
+                printf '%s\n' "$v" | while IFS= read -r line; do
+                  [ -n "$line" ] && printf '::add-mask::%s\n' "$line"
+                done
+              fi
+              printf 'export %s=%q\n' "$k" "$v" >> "$CTX"
+              names="$names $k"
+            done < <(printf '%s' "$json" | jq -r 'to_entries[] | .key + "=" + (.value | tostring | @base64)')
+
+            echo "$label:${names:- <none>}"
+          }
+
+          emit "${VARS_JSON:-}"     nomask "vars"
+          emit "${EXTRA_SECRETS:-}" mask   "SECRETS_JSON"
+          emit "${ALL_SECRETS:-}"   nomask "secrets"
+
+          echo "CTX_ENV=$CTX" >> "$GITHUB_ENV"
+
       - name: Resolve toolchain
         id: tc
         shell: bash
@@ -564,6 +619,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ -n "${CTX_ENV:-}" ] && [ -f "$CTX_ENV" ]; then . "$CTX_ENV"; fi
+
           eval "${BUILD_COMMAND//$'\r'/}"
 
       - name: Run CI command
@@ -575,6 +632,9 @@ jobs:
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
+
+          if [ -n "${CTX_ENV:-}" ] && [ -f "$CTX_ENV" ]; then . "$CTX_ENV"; fi
+
           eval "${CI_COMMAND//$'\r'/}"
 
       - name: Upload workspace
@@ -588,6 +648,14 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
+
+      - name: Cleanup collected context
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          [ -n "${CTX_ENV:-}" ] && rm -f "$CTX_ENV"
+          exit 0
 
   release-publish:
     needs: [resolve-branch, resolve-config, ci]
@@ -966,6 +1034,7 @@ jobs:
 
     permissions:
       contents: read
+      packages: read
 
     env:
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
@@ -1005,6 +1074,59 @@ jobs:
           fi
           echo "Resolved: method=$DEPLOY_METHOD scope=$SCOPE mirror=$DEPLOY_MIRROR commits='$COMMITS'"
 
+      - name: Collect vars & secrets
+        shell: bash
+        env:
+          VARS_JSON: ${{ toJSON(vars) }}
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          EXTRA_SECRETS: ${{ secrets.SECRETS_JSON }}
+        run: |
+          set -euo pipefail
+
+          tmp="$RUNNER_TEMP"
+          if command -v cygpath >/dev/null 2>&1; then tmp="$(cygpath -u "$RUNNER_TEMP")"; fi
+          CTX="$tmp/ctx_env.sh"
+          : > "$CTX"
+          chmod 600 "$CTX"
+
+          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token)$'
+
+          emit() {
+            local json="$1" mask="$2" label="$3"
+            local names="" k b64 v
+
+            if [ -z "$json" ] || [ "$json" = "null" ] || [ "$json" = "{}" ]; then
+              echo "$label: <none>"
+              return 0
+            fi
+            if ! printf '%s' "$json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+              echo "::error::$label is not a JSON object. Expected {\"NAME\":\"value\", ...}." >&2
+              exit 1
+            fi
+
+            while IFS='=' read -r k b64; do
+              [ -z "$k" ] && continue
+              case "$k" in [A-Za-z_][A-Za-z0-9_]*) ;; *) continue ;; esac
+              if printf '%s' "$k" | grep -qE "$DENY"; then continue; fi
+              v="$(printf '%s' "$b64" | base64 -d)"
+              if [ "$mask" = "mask" ] && [ -n "$v" ]; then
+                printf '%s\n' "$v" | while IFS= read -r line; do
+                  [ -n "$line" ] && printf '::add-mask::%s\n' "$line"
+                done
+              fi
+              printf 'export %s=%q\n' "$k" "$v" >> "$CTX"
+              names="$names $k"
+            done < <(printf '%s' "$json" | jq -r 'to_entries[] | .key + "=" + (.value | tostring | @base64)')
+
+            echo "$label:${names:- <none>}"
+          }
+
+          emit "${VARS_JSON:-}"     nomask "vars"
+          emit "${EXTRA_SECRETS:-}" mask   "SECRETS_JSON"
+          emit "${ALL_SECRETS:-}"   nomask "secrets"
+
+          echo "CTX_ENV=$CTX" >> "$GITHUB_ENV"
+
       - name: Setup SSH key
         if: ${{ env.DEPLOY_METHOD == 'rsync' || env.DEPLOY_METHOD == 'git' || env.DEPLOY_METHOD == 'command' }}
         shell: bash
@@ -1013,6 +1135,59 @@ jobs:
           echo "$DEPLOY_KEY" > "$TMP_KEY"
           chmod 600 "$TMP_KEY"
           echo "TMP_KEY=$TMP_KEY" >> "$GITHUB_ENV"
+
+      - name: Build remote prelude
+        if: ${{ env.DEPLOY_METHOD != 'ftp' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          PRELUDE="$RUNNER_TEMP/remote_prelude.sh"
+          : > "$PRELUDE"
+          chmod 600 "$PRELUDE"
+
+          {
+            printf 'export GIT_AUTH_TOKEN_GH=%q\n'  "$GH_TOKEN"
+            printf 'export GIT_AUTH_TOKEN_PAT=%q\n' "${PAT_TOKEN:-}"
+            cat <<'PRELUDE_GIT'
+          __gt_askpass="$(mktemp)"
+          chmod 700 "$__gt_askpass"
+          printf '%s\n' '#!/bin/sh' 'case "$1" in Username*) echo x-access-token ;; *) echo "$GIT_AUTH_TOKEN" ;; esac' > "$__gt_askpass"
+          export __GT_ASKPASS="$__gt_askpass"
+          trap 'rm -f "$__gt_askpass"' EXIT
+
+          git_use_token() {
+            export GIT_AUTH_TOKEN="$1"
+            export GIT_ASKPASS="$__GT_ASKPASS"
+            export GIT_TERMINAL_PROMPT=0
+            export GIT_CONFIG_COUNT=2
+            export GIT_CONFIG_KEY_0='url.https://github.com/.insteadOf'
+            export GIT_CONFIG_VALUE_0='git@github.com:'
+            export GIT_CONFIG_KEY_1='url.https://github.com/.insteadOf'
+            export GIT_CONFIG_VALUE_1='ssh://git@github.com/'
+          }
+
+          __GT_SSH_OK=0
+          if command -v ssh >/dev/null 2>&1; then
+            if ssh -T -o BatchMode=yes -o StrictHostKeyChecking=no \
+                   -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+                   git@github.com 2>&1 | grep -q 'successfully authenticated'; then
+              __GT_SSH_OK=1
+            fi
+          fi
+          export __GT_SSH_OK
+
+          if [ "$__GT_SSH_OK" = 1 ]; then
+            echo "git: the server has a working GitHub SSH key — using it"
+          else
+            git_use_token "$GIT_AUTH_TOKEN_GH"
+            echo "git: no SSH access to github.com — using HTTPS with the runner token"
+          fi
+          PRELUDE_GIT
+          } >> "$PRELUDE"
 
       - name: Checkout
         if: ${{ env.SCOPE != 'none' }}
@@ -1131,6 +1306,9 @@ jobs:
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
+
+          if [ -n "${CTX_ENV:-}" ] && [ -f "$CTX_ENV" ]; then . "$CTX_ENV"; fi
+
           eval "${BUILD_COMMAND//$'\r'/}"
 
       - name: Cache lftp
@@ -1234,13 +1412,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" bash -s <<REMOTE
-          set -e
-          export GH_TOKEN='$GH_TOKEN'
-          export PAT_TOKEN='$PAT_TOKEN'
-          cd $DEPLOY_PATH
-          ${BEFORE_DEPLOY_COMMAND//$'\r'/}
-          REMOTE
+          S="$RUNNER_TEMP/remote_before.sh"
+          {
+            echo 'set -e'
+            if [ -n "${CTX_ENV:-}" ] && [ -f "$CTX_ENV" ]; then cat "$CTX_ENV"; fi
+            printf 'export GH_TOKEN=%q\n'  "$GH_TOKEN"
+            printf 'export PAT_TOKEN=%q\n' "${PAT_TOKEN:-}"
+            if [ -f "$RUNNER_TEMP/remote_prelude.sh" ]; then cat "$RUNNER_TEMP/remote_prelude.sh"; fi
+            printf 'cd %q\n' "$DEPLOY_PATH"
+            printf '%s\n' "${BEFORE_DEPLOY_COMMAND//$'\r'/}"
+          } > "$S"
+          chmod 600 "$S"
+
+          ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 \
+            -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" bash -s < "$S"
 
       - name: FTP deploy (full mirror)
         if: ${{ env.DEPLOY_METHOD == 'ftp' && env.SCOPE == 'full' }}
@@ -1579,25 +1764,92 @@ jobs:
 
       - name: GIT deploy
         if: ${{ env.DEPLOY_METHOD == 'git' }}
-        env:
-          GITHUB_REF_NAME: ${{ github.ref_name }}
         shell: bash
+        env:
+          REPO: ${{ github.repository }}
+          IS_TAG: ${{ needs.resolve-branch.outputs.is_tag }}
+          TAG_REF: ${{ needs.resolve-branch.outputs.ref }}
+          BRANCH_REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
-          ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -p $DEPLOY_PORT $DEPLOY_USER@$DEPLOY_HOST "
-            cd $DEPLOY_PATH
-            if [ ! -d '.git' ]; then
-              git clone --branch ${GITHUB_REF_NAME} git@github.com:${GITHUB_REPOSITORY}.git .
-            else
-              if [ "${DEPLOY_MIRROR}" = "full" ]; then
-                git fetch origin ${GITHUB_REF_NAME}
-                git reset --hard origin/${GITHUB_REF_NAME}
-              else
-                git pull origin ${GITHUB_REF_NAME}
-              fi
+          if [ "$IS_TAG" = "true" ]; then
+            TARGET="$TAG_REF"; KIND=tag
+          else
+            TARGET="$BRANCH_REF"; KIND=branch
+          fi
+          echo "Deploying $KIND '$TARGET' of $REPO to $DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH"
+
+          S="$RUNNER_TEMP/remote_git.sh"
+          {
+            echo 'set -e'
+            if [ -f "$RUNNER_TEMP/remote_prelude.sh" ]; then cat "$RUNNER_TEMP/remote_prelude.sh"; fi
+            printf 'export __REPO=%q\n'   "$REPO"
+            printf 'export __TARGET=%q\n' "$TARGET"
+            printf 'export __KIND=%q\n'   "$KIND"
+            printf 'export __MIRROR=%q\n' "$DEPLOY_MIRROR"
+            printf 'export __DIR=%q\n'    "$DEPLOY_PATH"
+            cat <<'REMOTE_GIT'
+          cd "$__DIR"
+
+          if [ "${__GT_SSH_OK:-0}" = 1 ]; then
+            ORIGIN="git@github.com:$__REPO.git"
+          else
+            ORIGIN="https://github.com/$__REPO.git"
+          fi
+
+          __GT_MODE=native
+
+          _git_try() {
+            __m="$1"; shift
+            case "$__m" in
+              gh)  ( git_use_token "$GIT_AUTH_TOKEN_GH";  git "$@" ) ;;
+              pat) ( git_use_token "$GIT_AUTH_TOKEN_PAT"; git "$@" ) ;;
+              *)   git "$@" ;;
+            esac
+          }
+
+          run_git() {
+            if _git_try "$__GT_MODE" "$@"; then return 0; fi
+            if [ "$__GT_MODE" != gh ] && [ -n "${GIT_AUTH_TOKEN_GH:-}" ]; then
+              echo "git $1: retrying over HTTPS with GITHUB_TOKEN" >&2
+              if _git_try gh "$@"; then __GT_MODE=gh; return 0; fi
             fi
-          "
+            if [ "$__GT_MODE" != pat ] && [ -n "${GIT_AUTH_TOKEN_PAT:-}" ]; then
+              echo "git $1: retrying over HTTPS with PAT_TOKEN" >&2
+              if _git_try pat "$@"; then __GT_MODE=pat; return 0; fi
+            fi
+            return 1
+          }
+
+          if [ ! -d .git ]; then
+            run_git clone --branch "$__TARGET" "$ORIGIN" .
+          else
+            git remote set-url origin "$ORIGIN"
+            if [ "$__KIND" = "tag" ]; then
+              run_git fetch --force origin "refs/tags/$__TARGET:refs/tags/$__TARGET"
+              git checkout --force "refs/tags/$__TARGET"
+            elif [ "$__MIRROR" = "full" ]; then
+              run_git fetch --prune origin "+refs/heads/$__TARGET:refs/remotes/origin/$__TARGET"
+              git checkout --force "$__TARGET" 2>/dev/null || git checkout --force -B "$__TARGET" "refs/remotes/origin/$__TARGET"
+              git reset --hard "refs/remotes/origin/$__TARGET"
+            else
+              run_git pull origin "$__TARGET"
+            fi
+          fi
+
+          if [ -f .gitmodules ]; then
+            run_git submodule sync --recursive
+            run_git submodule update --init --recursive
+          fi
+
+          git --no-pager log -1 --oneline
+          REMOTE_GIT
+          } > "$S"
+          chmod 600 "$S"
+
+          ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 \
+            -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" bash -s < "$S"
 
       - name: After deploy command
         if: ${{ env.AFTER_DEPLOY_COMMAND != '' && env.DEPLOY_METHOD != 'ftp' }}
@@ -1608,16 +1860,29 @@ jobs:
         run: |
           set -euo pipefail
 
-          ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" bash -s <<REMOTE
-          set -e
-          export GH_TOKEN='$GH_TOKEN'
-          export PAT_TOKEN='$PAT_TOKEN'
-          cd $DEPLOY_PATH
-          ${AFTER_DEPLOY_COMMAND//$'\r'/}
-          REMOTE
+          S="$RUNNER_TEMP/remote_after.sh"
+          {
+            echo 'set -e'
+            if [ -n "${CTX_ENV:-}" ] && [ -f "$CTX_ENV" ]; then cat "$CTX_ENV"; fi
+            printf 'export GH_TOKEN=%q\n'  "$GH_TOKEN"
+            printf 'export PAT_TOKEN=%q\n' "${PAT_TOKEN:-}"
+            if [ -f "$RUNNER_TEMP/remote_prelude.sh" ]; then cat "$RUNNER_TEMP/remote_prelude.sh"; fi
+            printf 'cd %q\n' "$DEPLOY_PATH"
+            printf '%s\n' "${AFTER_DEPLOY_COMMAND//$'\r'/}"
+          } > "$S"
+          chmod 600 "$S"
 
-      - name: Cleanup SSH key
+          ssh -i "$TMP_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 \
+            -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" bash -s < "$S"
+
+      - name: Cleanup
         if: always()
         shell: bash
         run: |
-          [ -n "${TMP_KEY:-}" ] && [ -f "$TMP_KEY" ] && rm -f "$TMP_KEY" || true
+          set +e
+
+          rm -f "$RUNNER_TEMP/remote_prelude.sh" "$RUNNER_TEMP/remote_before.sh" \
+                "$RUNNER_TEMP/remote_after.sh" "$RUNNER_TEMP/remote_git.sh"
+          [ -n "${CTX_ENV:-}" ] && rm -f "$CTX_ENV"
+          [ -n "${TMP_KEY:-}" ] && rm -f "$TMP_KEY"
+          exit 0
