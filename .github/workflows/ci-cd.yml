@@ -451,7 +451,7 @@ jobs:
               exit 1
             fi
 
-            while IFS='=' read -r k b64; do
+            while IFS=$'\t' read -r k b64; do
               [ -z "$k" ] && continue
               case "$k" in [A-Za-z_][A-Za-z0-9_]*) ;; *) continue ;; esac
               if printf '%s' "$k" | grep -qE "$DENY"; then continue; fi
@@ -463,7 +463,7 @@ jobs:
               fi
               printf 'export %s=%q\n' "$k" "$v" >> "$CTX"
               names="$names $k"
-            done < <(printf '%s' "$json" | jq -r 'to_entries[] | .key + "=" + (.value | tostring | @base64)')
+            done < <(printf '%s' "$json" | jq -r 'to_entries[] | .key + "\t" + (.value | tostring | @base64)')
 
             echo "$label:${names:- <none>}"
           }
@@ -1107,7 +1107,7 @@ jobs:
               exit 1
             fi
 
-            while IFS='=' read -r k b64; do
+            while IFS=$'\t' read -r k b64; do
               [ -z "$k" ] && continue
               case "$k" in [A-Za-z_][A-Za-z0-9_]*) ;; *) continue ;; esac
               if printf '%s' "$k" | grep -qE "$DENY"; then continue; fi
@@ -1119,7 +1119,7 @@ jobs:
               fi
               printf 'export %s=%q\n' "$k" "$v" >> "$CTX"
               names="$names $k"
-            done < <(printf '%s' "$json" | jq -r 'to_entries[] | .key + "=" + (.value | tostring | @base64)')
+            done < <(printf '%s' "$json" | jq -r 'to_entries[] | .key + "\t" + (.value | tostring | @base64)')
 
             echo "$label:${names:- <none>}"
           }
