@@ -177,14 +177,79 @@ jobs:
             echo "NOTHING_TO_SYNC=true" >> "$GITHUB_ENV"
           fi
 
-      - name: Setup ssh key
+      - name: Setup ssh auth
         if: ${{ env.DEPLOY_METHOD == 'rsync' }}
         shell: bash
         run: |
+          set -uo pipefail
+
           TMP_KEY=$(mktemp)
-          echo "$DEPLOY_KEY" > "$TMP_KEY"
+          printf '%s\n' "$DEPLOY_KEY" > "$TMP_KEY"
           chmod 600 "$TMP_KEY"
           echo "TMP_KEY=$TMP_KEY" >> "$GITHUB_ENV"
+
+          GT_SSH="$RUNNER_TEMP/gt-ssh"
+          GT_AUTH_MODE=""
+          SSH_COMMON=(-o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+
+          IS_PEM=0
+          case "$(head -n 1 "$TMP_KEY")" in
+            -----BEGIN*) IS_PEM=1 ;;
+          esac
+
+          if [ "$IS_PEM" = 0 ]; then
+            if ! command -v sshpass >/dev/null 2>&1; then
+              sudo apt-get update -q
+              sudo apt-get install -y --no-install-recommends sshpass
+            fi
+            echo "ssh auth: probing password..."
+
+            if sshpass -f "$TMP_KEY" ssh \
+                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                 -o NumberOfPasswordPrompts=1 "${SSH_COMMON[@]}" \
+                 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" true \
+                 2> "$RUNNER_TEMP/ssh_probe_password.log"; then
+              GT_AUTH_MODE=password
+            fi
+          fi
+
+          if [ -z "$GT_AUTH_MODE" ]; then
+            echo "ssh auth: probing private key..."
+            if ssh -i "$TMP_KEY" \
+                 -o PreferredAuthentications=publickey -o IdentitiesOnly=yes -o BatchMode=yes \
+                 "${SSH_COMMON[@]}" \
+                 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" true \
+                 2> "$RUNNER_TEMP/ssh_probe_key.log"; then
+              GT_AUTH_MODE=key
+            fi
+          fi
+
+          if [ -z "$GT_AUTH_MODE" ]; then
+            echo "::error::Cannot authenticate to $DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PORT — DEPLOY_KEY was tried both as a password and as a private key."
+            for f in "$RUNNER_TEMP/ssh_probe_password.log" "$RUNNER_TEMP/ssh_probe_key.log"; do
+              [ -s "$f" ] && { echo "--- $(basename "$f") ---"; cat "$f"; }
+            done
+            exit 1
+          fi
+
+          if [ "$GT_AUTH_MODE" = password ]; then
+            {
+              echo '#!/usr/bin/env bash'
+              printf 'exec sshpass -f %q ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 %s -p %q "$@"\n' \
+                "$TMP_KEY" "${SSH_COMMON[*]}" "$DEPLOY_PORT"
+            } > "$GT_SSH"
+          else
+            {
+              echo '#!/usr/bin/env bash'
+              printf 'exec ssh -i %q -o PreferredAuthentications=publickey -o IdentitiesOnly=yes -o BatchMode=yes %s -p %q "$@"\n' \
+                "$TMP_KEY" "${SSH_COMMON[*]}" "$DEPLOY_PORT"
+            } > "$GT_SSH"
+          fi
+          chmod 700 "$GT_SSH"
+
+          echo "GT_SSH=$GT_SSH" >> "$GITHUB_ENV"
+          echo "GT_AUTH_MODE=$GT_AUTH_MODE" >> "$GITHUB_ENV"
+          echo "ssh auth: using $GT_AUTH_MODE"
 
       - name: Cache lftp
         if: ${{ env.DEPLOY_METHOD == 'ftp' }}
@@ -222,11 +287,7 @@ jobs:
             DEPLOY_PATH_STRIPPED="${DEPLOY_PATH%/}"
 
             if [ "$DEPLOY_METHOD" = "rsync" ]; then
-              ssh -i "$TMP_KEY" \
-                -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 \
-                -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-                -p "$DEPLOY_PORT" \
-                "$DEPLOY_USER@$DEPLOY_HOST" \
+              "$GT_SSH" "$DEPLOY_USER@$DEPLOY_HOST" \
                 "while IFS= read -r f; do test -f \"${DEPLOY_PATH_STRIPPED}/\$f\" && echo \"\$f\"; done" \
                 < "$TO_DOWNLOAD" > "$SERVER_FILES"
 
@@ -247,11 +308,7 @@ jobs:
           SERVER_FILES="$RUNNER_TEMP/server_files.txt"
 
           if [ "$DEPLOY_METHOD" = "rsync" ]; then
-            ssh -i "$TMP_KEY" \
-              -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 \
-              -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-              -p "$DEPLOY_PORT" \
-              "$DEPLOY_USER@$DEPLOY_HOST" \
+            "$GT_SSH" "$DEPLOY_USER@$DEPLOY_HOST" \
               "find -L '$DEPLOY_PATH' -type f -printf '%P\n'" \
               | grep -vE '^\.git' > "$SERVER_FILES"
 
@@ -417,7 +474,7 @@ jobs:
           fi
 
           rsync -avz --progress \
-            -e "ssh -i $TMP_KEY -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -p $DEPLOY_PORT" \
+            -e "$GT_SSH" \
             --files-from="$FILTERED_FILES" \
             --ignore-missing-args \
             --no-perms --no-owner --no-group \
@@ -519,8 +576,10 @@ jobs:
 
           echo "=== Branch pushed: $BRANCH ==="
 
-      - name: Cleanup ssh key
+      - name: Cleanup ssh auth
         if: always()
         shell: bash
         run: |
-          [ -n "${TMP_KEY:-}" ] && [ -f "$TMP_KEY" ] && rm -f "$TMP_KEY" || true
+          [ -n "${TMP_KEY:-}" ] && [ -f "$TMP_KEY" ] && rm -f "$TMP_KEY"
+          rm -f "$RUNNER_TEMP/gt-ssh" "$RUNNER_TEMP/ssh_probe_password.log" "$RUNNER_TEMP/ssh_probe_key.log"
+          exit 0
