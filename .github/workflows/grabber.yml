@@ -279,7 +279,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export LC_ALL=C
 
           if [ "$COMMITS_MODE" = "true" ]; then
             TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
@@ -311,7 +310,7 @@ jobs:
           if [ "$DEPLOY_METHOD" = "rsync" ]; then
             "$GT_SSH" "$DEPLOY_USER@$DEPLOY_HOST" \
               "find -L '$DEPLOY_PATH' -type f -printf '%P\n'" \
-              | grep -vE '^\.git' > "$SERVER_FILES"
+              | LC_ALL=C grep -vE '^\.git' > "$SERVER_FILES"
 
           elif [ "$DEPLOY_METHOD" = "ftp" ]; then
             touch "$RUNNER_TEMP/server_files_raw.txt"
@@ -334,9 +333,9 @@ jobs:
             done
             wait "$LFTP_PID"
             DEPLOY_PATH_STRIPPED="${DEPLOY_PATH%/}"
-            grep -v '/$' "$RUNNER_TEMP/server_files_raw.txt" \
-              | sed "s|^${DEPLOY_PATH_STRIPPED}/||" \
-              | grep -vE '^$|^\.git' > "$SERVER_FILES"
+            LC_ALL=C grep -v '/$' "$RUNNER_TEMP/server_files_raw.txt" \
+              | LC_ALL=C sed "s|^${DEPLOY_PATH_STRIPPED}/||" \
+              | LC_ALL=C grep -vE '^$|^\.git' > "$SERVER_FILES"
           fi
 
           echo "=== Total files on server: $(wc -l < "$SERVER_FILES") ==="
@@ -391,7 +390,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export LC_ALL=C
 
           FILTERED_FILES="$RUNNER_TEMP/to_download.txt"
 
