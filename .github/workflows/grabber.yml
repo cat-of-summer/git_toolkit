@@ -279,6 +279,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export LC_ALL=C
 
           if [ "$COMMITS_MODE" = "true" ]; then
             TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
@@ -333,7 +334,8 @@ jobs:
             done
             wait "$LFTP_PID"
             DEPLOY_PATH_STRIPPED="${DEPLOY_PATH%/}"
-            sed "s|^${DEPLOY_PATH_STRIPPED}/||" "$RUNNER_TEMP/server_files_raw.txt" \
+            grep -v '/$' "$RUNNER_TEMP/server_files_raw.txt" \
+              | sed "s|^${DEPLOY_PATH_STRIPPED}/||" \
               | grep -vE '^$|^\.git' > "$SERVER_FILES"
           fi
 
@@ -343,6 +345,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export LC_ALL=C
 
           SERVER_FILES="$RUNNER_TEMP/server_files.txt"
           FILTERED_FILES="$RUNNER_TEMP/to_download.txt"
@@ -388,6 +391,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export LC_ALL=C
 
           FILTERED_FILES="$RUNNER_TEMP/to_download.txt"
 
@@ -422,7 +426,9 @@ jobs:
             done < "$FILTERED_FILES"
 
             echo "quit"
-          } | lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST"
+          } > "$RUNNER_TEMP/lftp_get.txt"
+
+          lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" < "$RUNNER_TEMP/lftp_get.txt"
 
           if [ "$COMMITS_MODE" = "true" ]; then
             > "$RUNNER_TEMP/server_files.txt"
