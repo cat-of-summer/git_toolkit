@@ -16,7 +16,7 @@
 | Workflow | Триггеры | Назначение |
 |---|---|---|
 | [ci-cd](.github/workflows/ci-cd.yml.md) | `push` (ветки и теги `v*`), `pull_request`, `workflow_dispatch` | Сборка и тесты на нескольких ОС, GitHub Release, публикация в npm / Docker / Packagist, деплой на сервер |
-| [grabber](.github/workflows/grabber.yml.md) | `workflow_dispatch` | Забирает файлы с сервера в репозиторий и складывает их в ветку `sync/...` |
+| [grabber](.github/workflows/grabber.yml.md) | `workflow_dispatch` | Забирает файлы в репозиторий с сервера или из другого git-репозитория и складывает их в ветку `sync/...` |
 | [docgen](.github/workflows/docgen.yml.md) | `push`, `workflow_dispatch` | Держит структуру `docs/` в соответствии с деревом репозитория |
 | [minifier](.github/workflows/minifier.yml.md) | `push` | Минифицирует `.css` и `.js`, коммитит `*.min.*` рядом с исходниками |
 

@@ -3,6 +3,21 @@ name: grabber
 on:
   workflow_dispatch:
     inputs:
+      source_repo:
+        description: 'Source git repository (URL, owner/repo, self; empty = server, or current repo when source_ref is set)'
+        required: false
+        type: string
+        default: ''
+      source_ref:
+        description: 'Source branch / tag / commit'
+        required: false
+        type: string
+        default: ''
+      source_path:
+        description: 'Subdirectory inside the source repository'
+        required: false
+        type: string
+        default: ''
       commits:
         description: 'Comma-separated commits to grab files from'
         required: false
@@ -15,6 +30,21 @@ on:
         default: 'false'
   workflow_call:
     inputs:
+      source_repo:
+        description: 'Source git repository (URL, owner/repo, self; empty = server, or current repo when source_ref is set)'
+        required: false
+        type: string
+        default: ''
+      source_ref:
+        description: 'Source branch / tag / commit'
+        required: false
+        type: string
+        default: ''
+      source_path:
+        description: 'Subdirectory inside the source repository'
+        required: false
+        type: string
+        default: ''
       commits:
         description: 'Comma-separated commits to grab files from'
         required: false
@@ -27,6 +57,12 @@ on:
         default: 'false'
     secrets:
       DEPLOY_KEY:
+        required: false
+      PAT_TOKEN:
+        required: false
+      PAT_USER:
+        required: false
+      PAT_PASSWORD:
         required: false
 
 permissions:
@@ -53,23 +89,102 @@ jobs:
         env:
           DEPLOY_METHOD_RAW: ${{ vars.DEPLOY_METHOD }}
           DEPLOY_MIRROR_RAW: ${{ inputs.deploy_mirror || 'false' }}
+          SOURCE_REPO_RAW: ${{ inputs.source_repo || vars.GRABBER_REPO }}
+          SOURCE_REF_RAW: ${{ inputs.source_ref || vars.GRABBER_REF }}
+          SOURCE_PATH_RAW: ${{ inputs.source_path || vars.GRABBER_PATH }}
         run: |
           set -euo pipefail
 
           lower() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
-          DEPLOY_METHOD="$(lower "$DEPLOY_METHOD_RAW")"
-          DEPLOY_MIRROR="$(lower "$DEPLOY_MIRROR_RAW")"
+          trim() { printf '%s' "${1:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
 
-          case "$DEPLOY_METHOD" in
-            rsync|ftp) ;;
-            *)
-              echo "::error::grabber supports only DEPLOY_METHOD=rsync | ftp (got '$DEPLOY_METHOD'). Downloading from the server has no meaning for command or git." >&2
-              exit 1
-              ;;
-          esac
+          DEPLOY_METHOD="$(lower "${DEPLOY_METHOD_RAW:-}")"
+          DEPLOY_MIRROR="$(lower "${DEPLOY_MIRROR_RAW:-}")"
 
-          echo "method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR"
+          SOURCE_REPO="$(trim "${SOURCE_REPO_RAW:-}")"
+          SOURCE_REF="$(trim "${SOURCE_REF_RAW:-}")"
+          SOURCE_PATH="$(trim "${SOURCE_PATH_RAW:-}")"
+
+          if [ "$(lower "$SOURCE_REPO")" = "none" ]; then
+            SOURCE_REPO=""
+            SOURCE_REF=""
+            SOURCE_PATH=""
+          fi
+
+          GRAB_MODE=server
+          if [ -n "$SOURCE_REPO" ] || [ -n "$SOURCE_REF" ]; then
+            GRAB_MODE=repo
+          fi
+
+          SOURCE_PATH="${SOURCE_PATH#./}"
+          SOURCE_PATH="${SOURCE_PATH#/}"
+          SOURCE_PATH="${SOURCE_PATH%/}"
+          [ "$SOURCE_PATH" = "." ] && SOURCE_PATH=""
+
+          if [ "$GRAB_MODE" = "server" ] && [ -n "$SOURCE_PATH" ]; then
+            echo "::error::source_path is set, but neither source_repo nor source_ref is — there is no source repository to take a subdirectory from." >&2
+            exit 1
+          fi
+
+          SOURCE_URL=""
+          if [ "$GRAB_MODE" = "repo" ]; then
+            SERVER="${GITHUB_SERVER_URL%/}"
+            case "$SOURCE_REPO" in
+              ''|self|Self|SELF)
+                SOURCE_URL="$SERVER/$GITHUB_REPOSITORY.git"
+                ;;
+              http://*|https://*)
+                SOURCE_URL="$SOURCE_REPO"
+                ;;
+              ssh://*|git://*)
+                rest="${SOURCE_REPO#*://}"
+                rest="${rest#*@}"
+                host="${rest%%/*}"
+                host="${host%%:*}"
+                path="${rest#*/}"
+                SOURCE_URL="https://$host/$path"
+                ;;
+              *@*:*)
+                rest="${SOURCE_REPO#*@}"
+                host="${rest%%:*}"
+                path="${rest#*:}"
+                SOURCE_URL="https://$host/$path"
+                ;;
+              *)
+                if printf '%s' "$SOURCE_REPO" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+                  SOURCE_URL="$SERVER/${SOURCE_REPO%.git}.git"
+                else
+                  echo "::error::Cannot understand source_repo='$SOURCE_REPO'. Expected 'owner/repo', 'self', 'https://host/path', 'git@host:path' or 'ssh://git@host/path'." >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          else
+            case "$DEPLOY_METHOD" in
+              rsync|ftp) ;;
+              *)
+                echo "::error::grabber supports only DEPLOY_METHOD=rsync | ftp (got '$DEPLOY_METHOD'). Downloading from the server has no meaning for command or git. To grab from a git repository set source_repo / source_ref instead." >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          LOCAL_DIR="${DEPLOY_LOCAL_DIR%/}"
+          LOCAL_DIR="${LOCAL_DIR#./}"
+          [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
+
+          if [ "$GRAB_MODE" = "repo" ]; then
+            echo "mode=repo source=$SOURCE_URL ref=${SOURCE_REF:-<default>} path=${SOURCE_PATH:-<root>} mirror=$DEPLOY_MIRROR"
+          else
+            echo "mode=server method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR"
+          fi
+
           {
+            echo "GRAB_MODE=$GRAB_MODE"
+            echo "SOURCE_URL=$SOURCE_URL"
+            echo "SOURCE_REF=$SOURCE_REF"
+            echo "SOURCE_PATH=$SOURCE_PATH"
+            echo "LOCAL_DIR=$LOCAL_DIR"
             echo "DEPLOY_METHOD=$DEPLOY_METHOD"
             echo "DEPLOY_MIRROR=$DEPLOY_MIRROR"
           } >> "$GITHUB_ENV"
@@ -86,29 +201,194 @@ jobs:
           git config core.autocrlf false
           git config core.quotepath false
 
+      - name: Setup source auth
+        if: ${{ env.GRAB_MODE == 'repo' }}
+        shell: bash
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PAT_USER: ${{ secrets.PAT_USER }}
+          PAT_PASSWORD: ${{ secrets.PAT_PASSWORD }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          for v in "${PAT_TOKEN:-}" "${PAT_PASSWORD:-}"; do
+            if [ -n "$v" ]; then printf '::add-mask::%s\n' "$v"; fi
+          done
+
+          ASKPASS="$RUNNER_TEMP/gt-askpass"
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'case "$1" in Username*) printf "%s\n" "${GT_GIT_USER:-}" ;; *) printf "%s\n" "${GT_GIT_PASS:-}" ;; esac' \
+            > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+
+          LABELS=(); USERS=(); PASSES=()
+          add() { LABELS+=("$1"); USERS+=("$2"); PASSES+=("$3"); }
+
+          if [ -n "${PAT_USER:-}" ] && [ -n "${PAT_PASSWORD:-}" ]; then
+            add "PAT_USER + PAT_PASSWORD" "$PAT_USER" "$PAT_PASSWORD"
+          fi
+          if [ -n "${PAT_USER:-}" ] && [ -z "${PAT_PASSWORD:-}" ] && [ -n "${PAT_TOKEN:-}" ]; then
+            add "PAT_USER + PAT_TOKEN" "$PAT_USER" "$PAT_TOKEN"
+          fi
+          if [ -n "${PAT_TOKEN:-}" ]; then
+            add "PAT_TOKEN as x-access-token" "x-access-token" "$PAT_TOKEN"
+            add "PAT_TOKEN as oauth2" "oauth2" "$PAT_TOKEN"
+            add "PAT_TOKEN as username" "$PAT_TOKEN" "x-oauth-basic"
+          fi
+
+          SERVER_HOST="${GITHUB_SERVER_URL#*://}"
+          SERVER_HOST="${SERVER_HOST%%/*}"
+          URL_HOST="${SOURCE_URL#*://}"
+          URL_HOST="${URL_HOST%%/*}"
+          URL_HOST="${URL_HOST#*@}"
+          URL_HOST="${URL_HOST%%:*}"
+          if [ -n "${GH_TOKEN:-}" ] && [ "$URL_HOST" = "$SERVER_HOST" ]; then
+            add "GITHUB_TOKEN" "x-access-token" "$GH_TOKEN"
+          fi
+          add "anonymous" "" ""
+
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_ASKPASS="$ASKPASS"
+
+          CHOSEN=-1
+          for i in "${!LABELS[@]}"; do
+            echo "source auth: probing ${LABELS[$i]}..."
+            if GT_GIT_USER="${USERS[$i]}" GT_GIT_PASS="${PASSES[$i]}" \
+               git -c credential.helper= -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+                   ls-remote --heads "$SOURCE_URL" >/dev/null 2> "$RUNNER_TEMP/gt_probe_$i.log"; then
+              CHOSEN=$i
+              break
+            fi
+          done
+
+          if [ "$CHOSEN" -lt 0 ]; then
+            echo "::error::Cannot access source repository $SOURCE_URL — every authentication method failed."
+            echo "Tried:"
+            for i in "${!LABELS[@]}"; do echo "  - ${LABELS[$i]}"; done
+            has() { if [ -n "${1:-}" ]; then echo yes; else echo no; fi; }
+            echo "Secrets present: PAT_USER=$(has "${PAT_USER:-}") PAT_PASSWORD=$(has "${PAT_PASSWORD:-}") PAT_TOKEN=$(has "${PAT_TOKEN:-}")"
+            for f in "$RUNNER_TEMP"/gt_probe_*.log; do
+              [ -s "$f" ] && { echo "--- $(basename "$f") ---"; cat "$f"; }
+            done
+            exit 1
+          fi
+
+          CRED="$RUNNER_TEMP/gt-git-cred.sh"
+          : > "$CRED"
+          chmod 600 "$CRED"
+          {
+            printf 'export GT_GIT_USER=%q\n' "${USERS[$CHOSEN]}"
+            printf 'export GT_GIT_PASS=%q\n' "${PASSES[$CHOSEN]}"
+            printf 'export GIT_ASKPASS=%q\n' "$ASKPASS"
+            printf 'export GIT_TERMINAL_PROMPT=0\n'
+          } >> "$CRED"
+
+          echo "GT_GIT_CRED=$CRED" >> "$GITHUB_ENV"
+          echo "source auth: using ${LABELS[$CHOSEN]}"
+
+      - name: Fetch source
+        if: ${{ env.GRAB_MODE == 'repo' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          . "$GT_GIT_CRED"
+
+          SRC="$RUNNER_TEMP/source"
+          rm -rf "$SRC"
+          mkdir -p "$SRC"
+          git -C "$SRC" init -q
+          git -C "$SRC" config core.fileMode false
+          git -C "$SRC" config core.autocrlf false
+          git -C "$SRC" config core.quotepath false
+          git -C "$SRC" config credential.helper ''
+          git -C "$SRC" remote add origin "$SOURCE_URL"
+
+          REF="$SOURCE_REF"
+          if [ -z "$REF" ]; then
+            REF=$(git -C "$SRC" ls-remote --symref origin HEAD | awk '/^ref:/ {print $2; exit}')
+            REF="${REF#refs/heads/}"
+            [ -z "$REF" ] && REF=HEAD
+            echo "source ref not specified — using default branch '$REF'"
+          fi
+
+          FETCHED=0
+          if [ -z "$COMMITS" ]; then
+            if git -C "$SRC" fetch -q --depth=1 --no-tags origin "$REF" 2>/dev/null; then
+              FETCHED=1
+            fi
+          fi
+          if [ "$FETCHED" = 0 ]; then
+            git -C "$SRC" fetch -q --tags origin '+refs/heads/*:refs/remotes/origin/*'
+            git -C "$SRC" fetch -q origin "$REF" 2>/dev/null || true
+          fi
+
+          SOURCE_COMMIT=""
+          for cand in "refs/remotes/origin/$REF" "refs/tags/$REF" "$REF" FETCH_HEAD; do
+            if SOURCE_COMMIT=$(git -C "$SRC" rev-parse --verify --quiet "${cand}^{commit}"); then
+              break
+            fi
+            SOURCE_COMMIT=""
+          done
+
+          if [ -z "$SOURCE_COMMIT" ]; then
+            echo "::error::Cannot resolve ref '$REF' in $SOURCE_URL — no such branch, tag or reachable commit." >&2
+            exit 1
+          fi
+
+          git -C "$SRC" checkout -q --detach "$SOURCE_COMMIT"
+
+          echo "Source $SOURCE_URL ref '$REF' = $SOURCE_COMMIT"
+          git -C "$SRC" --no-pager log -1 --oneline
+
+          {
+            echo "SRC_GIT=$SRC"
+            echo "SOURCE_COMMIT=$SOURCE_COMMIT"
+            echo "SOURCE_REF_RESOLVED=$REF"
+          } >> "$GITHUB_ENV"
+
       - name: Resolve REF_COMMIT
         shell: bash
         run: |
           set -euo pipefail
 
+          SRC_GIT="${SRC_GIT:-.}"
+
           if [ -z "$COMMITS" ]; then
-            REF_COMMIT=$(git rev-parse HEAD)
+            REF_COMMIT=$(git -C "$SRC_GIT" rev-parse HEAD)
             echo "No commits specified — REF_COMMIT = HEAD = $REF_COMMIT"
           else
             readarray -t COMMITS_ARR < <(echo "$COMMITS" | tr ',; \t\r\n' '\n' | tr -s '\n' | grep -v '^[[:space:]]*$')
-            REF_COMMIT=$(git log --no-walk --format='%ct %H' "${COMMITS_ARR[@]}" | sort -k1 -nr | head -1 | awk '{print $2}')
+            REF_COMMIT=$(git -C "$SRC_GIT" log --no-walk --format='%ct %H' "${COMMITS_ARR[@]}" | sort -k1 -nr | head -1 | awk '{print $2}')
             echo "Resolved REF_COMMIT (latest by committer-date) = $REF_COMMIT"
 
             if [ "${#COMMITS_ARR[@]}" -eq 1 ]; then
               MERGE_BASE="${COMMITS_ARR[0]}"
             else
-              MERGE_BASE=$(git merge-base --octopus "${COMMITS_ARR[@]}")
+              MERGE_BASE=$(git -C "$SRC_GIT" merge-base --octopus "${COMMITS_ARR[@]}")
             fi
-            if BASE_COMMIT=$(git rev-parse --verify --quiet "${MERGE_BASE}^"); then
+
+            PARENT=""
+            if ! PARENT=$(git -C "$SRC_GIT" rev-parse --verify --quiet "${MERGE_BASE}^"); then
+              PARENT=""
+            fi
+
+            BASE_COMMIT=""
+            if [ -n "$PARENT" ]; then
+              if ! BASE_COMMIT=$(git rev-parse --verify --quiet "${PARENT}^{commit}"); then
+                BASE_COMMIT=""
+              fi
+            fi
+
+            if [ -n "$BASE_COMMIT" ]; then
               echo "BASE_COMMIT (parent of merge-base $MERGE_BASE) = $BASE_COMMIT"
               echo "BASE_COMMIT=$BASE_COMMIT" >> "$GITHUB_ENV"
-            else
+            elif [ -z "$PARENT" ]; then
               echo "::warning::Cannot resolve parent of $MERGE_BASE (root commit?) — sync branch will fall back to HEAD"
+            else
+              echo "::warning::Commit $PARENT is not present in this repository (unrelated source history) — sync branch will fall back to HEAD"
             fi
           fi
 
@@ -126,10 +406,12 @@ jobs:
 
           echo "COMMITS_MODE=true" >> "$GITHUB_ENV"
 
-          LOCAL_DIR="${DEPLOY_LOCAL_DIR%/}"
-          LOCAL_DIR="${LOCAL_DIR#./}"
-          [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
-          echo "LOCAL_DIR=$LOCAL_DIR" >> "$GITHUB_ENV"
+          SRC_GIT="${SRC_GIT:-.}"
+          if [ "$GRAB_MODE" = "repo" ]; then
+            STRIP_DIR="$SOURCE_PATH"
+          else
+            STRIP_DIR="$LOCAL_DIR"
+          fi
 
           TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
           ALL_FILES="$RUNNER_TEMP/all_files.txt"
@@ -142,7 +424,7 @@ jobs:
             commit="${commit// /}"
             [ -z "$commit" ] && continue
             echo "=== Processing commit: $commit ==="
-            git diff-tree --no-commit-id -r --name-only "$commit" >> "$ALL_FILES"
+            git -C "$SRC_GIT" diff-tree --no-commit-id -r --name-only "$commit" >> "$ALL_FILES"
           done
 
           grep -vE '^\.git' "$ALL_FILES" > "$ALL_FILES.tmp" && mv "$ALL_FILES.tmp" "$ALL_FILES"
@@ -151,15 +433,15 @@ jobs:
 
           while IFS= read -r file; do
             [ -z "$file" ] && continue
-            if [ -z "$LOCAL_DIR" ]; then
-              if git cat-file -e "$REF_COMMIT:$file" 2>/dev/null; then
+            if [ -z "$STRIP_DIR" ]; then
+              if git -C "$SRC_GIT" cat-file -e "$REF_COMMIT:$file" 2>/dev/null; then
                 echo "$file" >> "$TO_DOWNLOAD"
               else
                 echo "::warning::Skipping '$file': not present at REF_COMMIT $REF_COMMIT"
               fi
-            elif [[ "$file" == "$LOCAL_DIR/"* ]]; then
-              stripped="${file#"$LOCAL_DIR/"}"
-              if git cat-file -e "$REF_COMMIT:$file" 2>/dev/null; then
+            elif [[ "$file" == "$STRIP_DIR/"* ]]; then
+              stripped="${file#"$STRIP_DIR/"}"
+              if git -C "$SRC_GIT" cat-file -e "$REF_COMMIT:$file" 2>/dev/null; then
                 echo "$stripped" >> "$TO_DOWNLOAD"
               else
                 echo "::warning::Skipping '$file': not present at REF_COMMIT $REF_COMMIT"
@@ -178,7 +460,7 @@ jobs:
           fi
 
       - name: Setup ssh auth
-        if: ${{ env.DEPLOY_METHOD == 'rsync' }}
+        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'rsync' }}
         shell: bash
         run: |
           set -uo pipefail
@@ -252,7 +534,7 @@ jobs:
           echo "ssh auth: using $GT_AUTH_MODE"
 
       - name: Cache lftp
-        if: ${{ env.DEPLOY_METHOD == 'ftp' }}
+        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'ftp' }}
         id: cache-lftp
         uses: actions/cache@v6
         with:
@@ -260,12 +542,12 @@ jobs:
           key: ${{ runner.os }}-apt-lftp-v2
 
       - name: Keep apt packages for caching
-        if: ${{ env.DEPLOY_METHOD == 'ftp' }}
+        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'ftp' }}
         shell: bash
         run: echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99keep-cache >/dev/null
 
       - name: Install lftp
-        if: ${{ env.DEPLOY_METHOD == 'ftp' }}
+        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'ftp' }}
         shell: bash
         run: |
           if [ "${{ steps.cache-lftp.outputs.cache-hit }}" = "true" ] && ls /var/cache/apt/archives/lftp_*.deb &>/dev/null; then
@@ -276,13 +558,15 @@ jobs:
           fi
 
       - name: List server files
+        if: ${{ env.GRAB_MODE == 'server' }}
         shell: bash
         run: |
           set -euo pipefail
 
+          SERVER_FILES="$RUNNER_TEMP/server_files.txt"
+
           if [ "$COMMITS_MODE" = "true" ]; then
             TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
-            SERVER_FILES="$RUNNER_TEMP/server_files.txt"
             > "$SERVER_FILES"
             DEPLOY_PATH_STRIPPED="${DEPLOY_PATH%/}"
 
@@ -299,13 +583,6 @@ jobs:
             echo "=== Files from commits found on server: $(wc -l < "$SERVER_FILES") ==="
             exit 0
           fi
-
-          LOCAL_DIR="${DEPLOY_LOCAL_DIR%/}"
-          LOCAL_DIR="${LOCAL_DIR#./}"
-          [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
-          echo "LOCAL_DIR=$LOCAL_DIR" >> "$GITHUB_ENV"
-
-          SERVER_FILES="$RUNNER_TEMP/server_files.txt"
 
           if [ "$DEPLOY_METHOD" = "rsync" ]; then
             "$GT_SSH" "$DEPLOY_USER@$DEPLOY_HOST" \
@@ -340,6 +617,44 @@ jobs:
 
           echo "=== Total files on server: $(wc -l < "$SERVER_FILES") ==="
 
+      - name: List source files
+        if: ${{ env.GRAB_MODE == 'repo' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+
+          SERVER_FILES="$RUNNER_TEMP/server_files.txt"
+          PREFIX=""
+          [ -n "$SOURCE_PATH" ] && PREFIX="$SOURCE_PATH/"
+
+          if [ "$COMMITS_MODE" = "true" ]; then
+            TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
+            > "$SERVER_FILES"
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              if [ -f "$SRC_GIT/$PREFIX$f" ]; then printf '%s\n' "$f" >> "$SERVER_FILES"; fi
+            done < "$TO_DOWNLOAD"
+
+            cp "$SERVER_FILES" "$TO_DOWNLOAD"
+            echo "=== Files from commits found in source: $(wc -l < "$SERVER_FILES") ==="
+            exit 0
+          fi
+
+          if [ -n "$SOURCE_PATH" ]; then
+            if [ -z "$(git -C "$SRC_GIT" ls-files -- "$SOURCE_PATH")" ]; then
+              echo "::error::source_path '$SOURCE_PATH' holds no tracked files in $SOURCE_URL at ref '$SOURCE_REF_RESOLVED'." >&2
+              exit 1
+            fi
+            git -C "$SRC_GIT" ls-files -- "$SOURCE_PATH" \
+              | while IFS= read -r f; do printf '%s\n' "${f#"$SOURCE_PATH/"}"; done \
+              | grep -vE '^\.git' > "$SERVER_FILES" || true
+          else
+            git -C "$SRC_GIT" ls-files | grep -vE '^\.git' > "$SERVER_FILES" || true
+          fi
+
+          echo "=== Total files in source: $(wc -l < "$SERVER_FILES") ==="
+
       - name: Filter files via .gitignore
         shell: bash
         run: |
@@ -372,13 +687,13 @@ jobs:
           IGNORED=$(wc -l < "$IGNORED_FILES")
           TO_DOWNLOAD=$(wc -l < "$FILTERED_FILES")
 
-          echo "=== Server files:  $TOTAL ==="
+          echo "=== Source files:  $TOTAL ==="
           echo "=== Ignored:       $IGNORED ==="
           echo "=== To download:   $TO_DOWNLOAD ==="
 
           if ! [ -s "$FILTERED_FILES" ]; then
             if [ "$COMMITS_MODE" = "true" ] && [ "${DEPLOY_MIRROR}" = "true" ] && [ -s "$RUNNER_TEMP/commits_original.txt" ]; then
-              echo "::warning::No files to download from server, but will apply mirror deletions"
+              echo "::warning::No files to download from the source, but will apply mirror deletions"
             else
               echo "::warning::No files to download after applying .gitignore filter"
               echo "NOTHING_TO_SYNC=true" >> "$GITHUB_ENV"
@@ -386,7 +701,7 @@ jobs:
           fi
 
       - name: FTP Download
-        if: ${{ env.DEPLOY_METHOD == 'ftp' && env.NOTHING_TO_SYNC != 'true' }}
+        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'ftp' && env.NOTHING_TO_SYNC != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -437,34 +752,13 @@ jobs:
               else
                 local_path="./$file"
               fi
-              [ -f "$local_path" ] && echo "$file" >> "$RUNNER_TEMP/server_files.txt"
+              if [ -f "$local_path" ]; then echo "$file" >> "$RUNNER_TEMP/server_files.txt"; fi
             done < "$RUNNER_TEMP/commits_original.txt"
             echo "=== Files actually downloaded from server: $(wc -l < "$RUNNER_TEMP/server_files.txt") ==="
           fi
 
-          if [ "${DEPLOY_MIRROR}" = "true" ]; then
-            if [ "$COMMITS_MODE" != "true" ]; then
-              SERVER_FILES="$RUNNER_TEMP/server_files.txt"
-              git ls-files | while IFS= read -r tracked; do
-                if [ -n "$LOCAL_DIR" ]; then
-                  if [[ "$tracked" == "$LOCAL_DIR/"* ]]; then
-                    rel="${tracked#"$LOCAL_DIR/"}"
-                  else
-                    continue
-                  fi
-                else
-                  rel="$tracked"
-                fi
-                if ! grep -qxF "$rel" "$SERVER_FILES"; then
-                  echo "Removing: $tracked"
-                  rm -f "$tracked"
-                fi
-              done
-            fi
-          fi
-
       - name: RSYNC Download
-        if: ${{ env.DEPLOY_METHOD == 'rsync' && env.NOTHING_TO_SYNC != 'true' }}
+        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'rsync' && env.NOTHING_TO_SYNC != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -485,26 +779,63 @@ jobs:
             --copy-links \
             "$DEPLOY_USER@$DEPLOY_HOST:${DEPLOY_PATH%/}/" "$DEST_DIR"
 
-          if [ "${DEPLOY_MIRROR}" = "true" ]; then
-            if [ "$COMMITS_MODE" != "true" ]; then
-              SERVER_FILES="$RUNNER_TEMP/server_files.txt"
-              git ls-files | while IFS= read -r tracked; do
-                if [ -n "$LOCAL_DIR" ]; then
-                  if [[ "$tracked" == "$LOCAL_DIR/"* ]]; then
-                    rel="${tracked#"$LOCAL_DIR/"}"
-                  else
-                    continue
-                  fi
-                else
-                  rel="$tracked"
-                fi
-                if ! grep -qxF "$rel" "$SERVER_FILES"; then
-                  echo "Removing: $tracked"
-                  rm -f "$tracked"
-                fi
-              done
-            fi
+      - name: Copy source files
+        if: ${{ env.GRAB_MODE == 'repo' && env.NOTHING_TO_SYNC != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILTERED_FILES="$RUNNER_TEMP/to_download.txt"
+          PREFIX=""
+          [ -n "$SOURCE_PATH" ] && PREFIX="$SOURCE_PATH/"
+
+          if [ -n "$LOCAL_DIR" ]; then
+            DEST_DIR="./$LOCAL_DIR"
+          else
+            DEST_DIR="."
           fi
+
+          COPIED=0
+          MISSING=0
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            if [ ! -f "$SRC_GIT/$PREFIX$file" ]; then
+              MISSING=$((MISSING + 1))
+              continue
+            fi
+            mkdir -p "$DEST_DIR/$(dirname "$file")"
+            cp -f "$SRC_GIT/$PREFIX$file" "$DEST_DIR/$file"
+            COPIED=$((COPIED + 1))
+          done < "$FILTERED_FILES"
+
+          echo "=== Files copied from source: $COPIED ==="
+          if [ "$MISSING" -gt 0 ]; then
+            echo "::warning::$MISSING file(s) from the list are missing in the source working tree"
+          fi
+
+      - name: Apply mirror deletions
+        if: ${{ env.DEPLOY_MIRROR == 'true' && env.COMMITS_MODE != 'true' && env.NOTHING_TO_SYNC != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SERVER_FILES="$RUNNER_TEMP/server_files.txt"
+
+          git ls-files | while IFS= read -r tracked; do
+            if [ -n "$LOCAL_DIR" ]; then
+              if [[ "$tracked" == "$LOCAL_DIR/"* ]]; then
+                rel="${tracked#"$LOCAL_DIR/"}"
+              else
+                continue
+              fi
+            else
+              rel="$tracked"
+            fi
+            if ! grep -qxF "$rel" "$SERVER_FILES"; then
+              echo "Removing: $tracked"
+              rm -f "$tracked"
+            fi
+          done
 
       - name: Commit and push
         if: ${{ env.NOTHING_TO_SYNC != 'true' }}
@@ -547,17 +878,19 @@ jobs:
               done
             fi
 
-            if [ "${DEPLOY_MIRROR}" = "true" ]; then
-              comm -23 <(sort "$RUNNER_TEMP/commits_original.txt") <(sort "$RUNNER_TEMP/server_files.txt") \
-                | while IFS= read -r file; do
-                    [ -z "$file" ] && continue
-                    if [ -n "$LOCAL_DIR" ]; then lp="./$LOCAL_DIR/$file"; else lp="./$file"; fi
-                    [ -f "$lp" ] && { echo "Removing: $lp"; rm -f "$lp"; }
-                  done
-            fi
           else
             git checkout -b "$BRANCH"
           fi
+
+          if [ "$COMMITS_MODE" = "true" ] && [ "${DEPLOY_MIRROR}" = "true" ]; then
+            comm -23 <(sort "$RUNNER_TEMP/commits_original.txt") <(sort "$RUNNER_TEMP/server_files.txt") \
+              | while IFS= read -r file; do
+                  [ -z "$file" ] && continue
+                  if [ -n "$LOCAL_DIR" ]; then lp="./$LOCAL_DIR/$file"; else lp="./$file"; fi
+                  if [ -f "$lp" ]; then echo "Removing: $lp"; rm -f "$lp"; fi
+                done
+          fi
+
           git add -A
 
           git reset -q -- .git .github .gitignore .gitattributes .gitmodules 2>/dev/null || true
@@ -574,16 +907,26 @@ jobs:
             exit 0
           fi
 
-          COMMIT_MSG="sync: import from server $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          if [ "$GRAB_MODE" = "repo" ]; then
+            SOURCE_DESC="${SOURCE_URL}@${SOURCE_REF_RESOLVED:-HEAD}"
+          else
+            SOURCE_DESC="server"
+          fi
+
+          COMMIT_MSG="sync: import from $SOURCE_DESC $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git commit -m "$COMMIT_MSG"
           git push origin "$BRANCH"
 
           echo "=== Branch pushed: $BRANCH ==="
 
-      - name: Cleanup ssh auth
+      - name: Cleanup
         if: always()
         shell: bash
         run: |
           [ -n "${TMP_KEY:-}" ] && [ -f "$TMP_KEY" ] && rm -f "$TMP_KEY"
-          rm -f "$RUNNER_TEMP/gt-ssh" "$RUNNER_TEMP/ssh_probe_password.log" "$RUNNER_TEMP/ssh_probe_key.log"
+          [ -n "${GT_GIT_CRED:-}" ] && rm -f "$GT_GIT_CRED"
+          rm -rf "$RUNNER_TEMP/source"
+          rm -f "$RUNNER_TEMP/gt-ssh" "$RUNNER_TEMP/gt-askpass" \
+                "$RUNNER_TEMP/ssh_probe_password.log" "$RUNNER_TEMP/ssh_probe_key.log" \
+                "$RUNNER_TEMP"/gt_probe_*.log
           exit 0

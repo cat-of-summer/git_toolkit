@@ -3,6 +3,21 @@ name: grabber
 on:
   workflow_dispatch:
     inputs:
+      source_repo:
+        description: 'Source git repository (URL, owner/repo, self; empty = server, or current repo when source_ref is set)'
+        required: false
+        type: string
+        default: ''
+      source_ref:
+        description: 'Source branch / tag / commit'
+        required: false
+        type: string
+        default: ''
+      source_path:
+        description: 'Subdirectory inside the source repository'
+        required: false
+        type: string
+        default: ''
       commits:
         description: 'Comma-separated commits to grab files from'
         required: false
@@ -22,6 +37,12 @@ jobs:
     uses: cat-of-summer/git_toolkit/.github/workflows/grabber.yml@main
     secrets:
       DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      PAT_USER: ${{ secrets.PAT_USER }}
+      PAT_PASSWORD: ${{ secrets.PAT_PASSWORD }}
     with:
+      source_repo: ${{ inputs.source_repo }}
+      source_ref: ${{ inputs.source_ref }}
+      source_path: ${{ inputs.source_path }}
       commits: ${{ inputs.commits }}
       deploy_mirror: ${{ inputs.deploy_mirror }}

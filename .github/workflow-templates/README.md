@@ -63,7 +63,7 @@ GitHub не позволяет.
 | Шаблон | Триггеры | Назначение | Настройка |
 |---|---|---|---|
 | `ci-cd.yml` | `push` (ветки и теги `v*`), `pull_request`, `workflow_dispatch` | Сборка и тесты, GitHub Release, публикация в npm / Docker / Packagist, деплой | Переменные в Environment; секреты — в Environment или в репозитории — [документация](../../docs/.github/workflows/ci-cd.yml.md) |
-| `grabber.yml` | `workflow_dispatch` | Забирает файлы с сервера в репозиторий, складывает в ветку `sync/...` | `DEPLOY_*` + секрет `DEPLOY_KEY` — [документация](../../docs/.github/workflows/grabber.yml.md) |
+| `grabber.yml` | `workflow_dispatch` | Забирает файлы в репозиторий — с сервера или из другого git-репозитория, складывает в ветку `sync/...` | `DEPLOY_*` + `DEPLOY_KEY` для сервера, входы `source_*` + `PAT_TOKEN` / `PAT_USER` + `PAT_PASSWORD` для git — [документация](../../docs/.github/workflows/grabber.yml.md) |
 | `docgen.yml` | `push` (только ветки), `workflow_dispatch` | Держит структуру `docs/` в соответствии с деревом репозитория | Только `docs/.docignore` — [документация](../../docs/.github/workflows/docgen.yml.md) |
 | `minifier.yml` | `push` (только ветки) | Минифицирует `.css` и `.js`, коммитит `*.min.*` | Не настраивается — [документация](../../docs/.github/workflows/minifier.yml.md) |
 
