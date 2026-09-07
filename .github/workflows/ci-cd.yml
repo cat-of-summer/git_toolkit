@@ -481,10 +481,6 @@ jobs:
           TOOLCHAIN: ${{ vars.TOOLCHAIN }}
         run: |
           set -euo pipefail
-          # mise backends that name a package path rather than a bare tool. Their specs
-          # carry slashes and an "@" of their own, so the version cannot be found by
-          # cutting at the first separator: "ubi:owner/repo@1.2.3" would otherwise come
-          # out as the tool "ubi" at version "owner/repo@1.2.3".
           backends="ubi,aqua,asdf,cargo,go,npm,pipx,gem,dotnet,spm,vfox,http"
           tools=""
           while IFS= read -r item; do
@@ -493,8 +489,6 @@ jobs:
             prefix="${item%%:*}"
             rest="${item#*:}"
             if [ "$prefix" != "$item" ] && [[ ",$backends," == *",$prefix,"* ]] && [[ "$rest" == */* ]]; then
-              # The version is an "@" in the last path segment. An "@" before that
-              # belongs to the package name, as in "npm:@scope/pkg".
               after="${rest##*/}"
               if [[ "$after" == *@* ]]; then
                 ver="${after##*@}"; name="$prefix:${rest%@*}"
@@ -502,11 +496,8 @@ jobs:
                 ver="latest"; name="$prefix:$rest"
               fi
             elif [[ "$item" == *@* ]]; then
-              # Plain tool with a version: node@24. A bare tool name has no slash, so
-              # the last "@" is always the separator here.
               name="${item%@*}"; ver="${item##*@}"
             elif [ "$prefix" != "$item" ]; then
-              # Legacy "tool:version" — node:24, go:1.23.
               name="$prefix"; ver="$rest"
             else
               name="$item"; ver="latest"
@@ -1327,10 +1318,6 @@ jobs:
           TOOLCHAIN: ${{ vars.TOOLCHAIN }}
         run: |
           set -euo pipefail
-          # mise backends that name a package path rather than a bare tool. Their specs
-          # carry slashes and an "@" of their own, so the version cannot be found by
-          # cutting at the first separator: "ubi:owner/repo@1.2.3" would otherwise come
-          # out as the tool "ubi" at version "owner/repo@1.2.3".
           backends="ubi,aqua,asdf,cargo,go,npm,pipx,gem,dotnet,spm,vfox,http"
           tools=""
           while IFS= read -r item; do
@@ -1339,8 +1326,6 @@ jobs:
             prefix="${item%%:*}"
             rest="${item#*:}"
             if [ "$prefix" != "$item" ] && [[ ",$backends," == *",$prefix,"* ]] && [[ "$rest" == */* ]]; then
-              # The version is an "@" in the last path segment. An "@" before that
-              # belongs to the package name, as in "npm:@scope/pkg".
               after="${rest##*/}"
               if [[ "$after" == *@* ]]; then
                 ver="${after##*@}"; name="$prefix:${rest%@*}"
@@ -1348,11 +1333,8 @@ jobs:
                 ver="latest"; name="$prefix:$rest"
               fi
             elif [[ "$item" == *@* ]]; then
-              # Plain tool with a version: node@24. A bare tool name has no slash, so
-              # the last "@" is always the separator here.
               name="${item%@*}"; ver="${item##*@}"
             elif [ "$prefix" != "$item" ]; then
-              # Legacy "tool:version" — node:24, go:1.23.
               name="$prefix"; ver="$rest"
             else
               name="$item"; ver="latest"
