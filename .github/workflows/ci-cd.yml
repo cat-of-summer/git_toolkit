@@ -463,7 +463,9 @@ jobs:
               fi
               printf 'export %s=%q\n' "$k" "$v" >> "$CTX"
               names="$names $k"
-            done < <(printf '%s' "$json" | jq -r 'to_entries[] | .key + "\t" + (.value | tostring | @base64)')
+            done < <(printf '%s' "$json" \
+              | jq -r 'to_entries[] | .key + "\t" + (.value | tostring | @base64)' \
+              | tr -d '\r')
 
             echo "$label:${names:- <none>}"
           }
@@ -1134,7 +1136,9 @@ jobs:
               fi
               printf 'export %s=%q\n' "$k" "$v" >> "$CTX"
               names="$names $k"
-            done < <(printf '%s' "$json" | jq -r 'to_entries[] | .key + "\t" + (.value | tostring | @base64)')
+            done < <(printf '%s' "$json" \
+              | jq -r 'to_entries[] | .key + "\t" + (.value | tostring | @base64)' \
+              | tr -d '\r')
 
             echo "$label:${names:- <none>}"
           }
