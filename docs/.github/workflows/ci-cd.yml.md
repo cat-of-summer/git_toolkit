@@ -310,6 +310,25 @@ TOOLCHAIN=go:1.23,php:8.3
 Список открытый: node, python, go, php, java, ruby, rust, bun, deno, terraform и сотни других.
 Добавить язык = дописать в переменную. Пусто → используются версии, предустановленные на runner'е.
 
+### Инструменты не из основного каталога
+
+Кроме имён языков принимается спецификация backend'а mise — так ставится что угодно, включая
+бинарь из GitHub Releases:
+
+```
+TOOLCHAIN=ubi:owner/repo@1.2.3
+TOOLCHAIN=npm:prettier@3
+TOOLCHAIN=cargo:ripgrep@14
+TOOLCHAIN=python@3.12,ubi:owner/repo@1.2.3
+```
+
+Backend'ы: `ubi`, `aqua`, `asdf`, `cargo`, `go`, `npm`, `pipx`, `gem`, `dotnet`, `spm`, `vfox`,
+`http`. Спецификация опознаётся по префиксу backend'а **и** слешу в остатке — поэтому `go:1.23`
+по-прежнему означает «Go версии 1.23», а не пакет backend'а `go`.
+
+У backend-спеки версия — это `@` в последнем сегменте пути: в `npm:@scope/pkg` версии нет,
+в `npm:@scope/pkg@1.0` она равна `1.0`.
+
 При `PUBLISH_METHOD=npm` версия node для публикации берётся из `TOOLCHAIN`; если node там не
 указан — используется `lts/*`.
 
