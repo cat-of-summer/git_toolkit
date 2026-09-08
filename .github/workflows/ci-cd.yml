@@ -419,7 +419,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-branch.outputs.is_tag == 'true' && needs.resolve-branch.outputs.ref || '' }}
-          submodules: true
+          submodules: recursive
 
       - name: Collect vars & secrets
         shell: bash
@@ -626,6 +626,82 @@ jobs:
             printf '%s\n' "$p" >> "$GITHUB_PATH"
           done
 
+      - name: Resolve dependency cache
+        id: depcache
+        if: ${{ vars.CACHE_PATHS != '' }}
+        shell: bash
+        env:
+          CACHE_PATHS: ${{ vars.CACHE_PATHS }}
+          CACHE_KEY_FILES: ${{ vars.CACHE_KEY_FILES }}
+        run: |
+          set -euo pipefail
+
+          split() {
+            printf '%s' "${1:-}" \
+              | tr ',' '\n' \
+              | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+              | grep -v '^$' || true
+          }
+
+          PATHS="$(split "$CACHE_PATHS")"
+          if [ -z "$PATHS" ]; then
+            echo "::error::CACHE_PATHS='$CACHE_PATHS' does not contain a single path." >&2
+            exit 1
+          fi
+
+          PATTERNS="$(split "${CACHE_KEY_FILES:-}")"
+          if [ -z "$PATTERNS" ]; then
+            echo "::error::CACHE_PATHS is set, but CACHE_KEY_FILES is empty. Without key files the cache would be saved once and never refreshed — list the lock files the dependencies come from, e.g. 'package-lock.json'." >&2
+            exit 1
+          fi
+
+          shopt -s globstar nullglob dotglob
+
+          files=()
+          while IFS= read -r pattern; do
+            [ -z "$pattern" ] && continue
+            eval "matches=( $pattern )"
+            for f in "${matches[@]}"; do
+              [ -f "$f" ] && files+=("$f")
+            done
+          done <<< "$PATTERNS"
+
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No files matched CACHE_KEY_FILES: $CACHE_KEY_FILES" >&2
+            exit 1
+          fi
+
+          sha() {
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi
+          }
+
+          HASH=$(
+            printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | while IFS= read -r f; do
+              printf '%s  %s\n' "$(sha < "$f" | cut -d' ' -f1)" "$f"
+            done | sha | cut -c1-64
+          )
+
+          echo "Cache paths:"
+          printf '%s\n' "$PATHS" | sed 's/^/  /'
+          echo "Key files:"
+          printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | sed 's/^/  /'
+          echo "Key hash: $HASH"
+
+          {
+            echo "paths<<EOF"
+            printf '%s\n' "$PATHS"
+            echo "EOF"
+            echo "hash=$HASH"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Cache dependencies
+        if: ${{ vars.CACHE_PATHS != '' }}
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.depcache.outputs.paths }}
+          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ steps.depcache.outputs.hash }}
+          restore-keys: deps-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Build
         if: ${{ env.BUILD_COMMAND != '' }}
         shell: bash
@@ -655,6 +731,7 @@ jobs:
           eval "${CI_COMMAND//$'\r'/}"
 
       - name: Upload workspace
+        if: ${{ needs.resolve-config.outputs.run_release == 'true' || (needs.resolve-config.outputs.run_cd == 'true' && needs.resolve-config.outputs.scope == 'full') }}
         uses: actions/upload-artifact@v7
         with:
           name: workspace-${{ matrix.os }}
@@ -688,6 +765,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-branch.outputs.ref }}
+          submodules: recursive
 
       - name: Download workspace from ci
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
@@ -770,6 +848,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-branch.outputs.ref }}
+          submodules: recursive
 
       - name: Download workspace from ci
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
@@ -921,6 +1000,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-branch.outputs.ref }}
+          submodules: recursive
 
       - name: Download workspace from ci
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
@@ -1282,6 +1362,7 @@ jobs:
         with:
           ref: ${{ needs.resolve-branch.outputs.is_tag == 'true' && needs.resolve-branch.outputs.ref || github.ref_name }}
           fetch-depth: 0
+          submodules: recursive
 
       - name: Resolve REF_COMMIT
         if: ${{ env.SCOPE == 'selective' }}
