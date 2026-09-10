@@ -420,14 +420,28 @@ jobs:
 
           readarray -t COMMITS_ARR < <(echo "$COMMITS" | tr ',; \t\r\n' '\n' | tr -s '\n' | grep -v '^[[:space:]]*$')
 
+          BAD_COMMITS=""
+          for commit in "${COMMITS_ARR[@]}"; do
+            commit="${commit// /}"
+            [ -z "$commit" ] && continue
+            if ! git -C "$SRC_GIT" cat-file -e "${commit}^{commit}" 2>/dev/null; then
+              BAD_COMMITS="$BAD_COMMITS $commit"
+            fi
+          done
+          if [ -n "$BAD_COMMITS" ]; then
+            echo "::error::Commit(s) not found in the source repository:$BAD_COMMITS" >&2
+            exit 1
+          fi
+
           for commit in "${COMMITS_ARR[@]}"; do
             commit="${commit// /}"
             [ -z "$commit" ] && continue
             echo "=== Processing commit: $commit ==="
-            git -C "$SRC_GIT" diff-tree --no-commit-id -r --name-only "$commit" >> "$ALL_FILES"
+            git -C "$SRC_GIT" diff-tree --no-commit-id -r --name-only -m --first-parent "$commit" >> "$ALL_FILES"
           done
 
-          grep -vE '^\.git' "$ALL_FILES" > "$ALL_FILES.tmp" && mv "$ALL_FILES.tmp" "$ALL_FILES"
+          { grep -vE '^\.git' "$ALL_FILES" || true; } > "$ALL_FILES.tmp"
+          mv "$ALL_FILES.tmp" "$ALL_FILES"
 
           sort -u -o "$ALL_FILES" "$ALL_FILES"
 
@@ -572,7 +586,7 @@ jobs:
 
             if [ "$DEPLOY_METHOD" = "rsync" ]; then
               "$GT_SSH" "$DEPLOY_USER@$DEPLOY_HOST" \
-                "while IFS= read -r f; do test -f \"${DEPLOY_PATH_STRIPPED}/\$f\" && echo \"\$f\"; done" \
+                "while IFS= read -r f; do [ -f \"${DEPLOY_PATH_STRIPPED}/\$f\" ] && printf '%s\n' \"\$f\"; done; exit 0" \
                 < "$TO_DOWNLOAD" > "$SERVER_FILES"
 
             elif [ "$DEPLOY_METHOD" = "ftp" ]; then
@@ -587,7 +601,7 @@ jobs:
           if [ "$DEPLOY_METHOD" = "rsync" ]; then
             "$GT_SSH" "$DEPLOY_USER@$DEPLOY_HOST" \
               "find -L '$DEPLOY_PATH' -type f -printf '%P\n'" \
-              | LC_ALL=C grep -vE '^\.git' > "$SERVER_FILES"
+              | { LC_ALL=C grep -vE '^\.git' || true; } > "$SERVER_FILES"
 
           elif [ "$DEPLOY_METHOD" = "ftp" ]; then
             touch "$RUNNER_TEMP/server_files_raw.txt"
@@ -610,9 +624,9 @@ jobs:
             done
             wait "$LFTP_PID"
             DEPLOY_PATH_STRIPPED="${DEPLOY_PATH%/}"
-            LC_ALL=C grep -v '/$' "$RUNNER_TEMP/server_files_raw.txt" \
+            { LC_ALL=C grep -v '/$' "$RUNNER_TEMP/server_files_raw.txt" || true; } \
               | LC_ALL=C sed "s|^${DEPLOY_PATH_STRIPPED}/||" \
-              | LC_ALL=C grep -vE '^$|^\.git' > "$SERVER_FILES"
+              | { LC_ALL=C grep -vE '^$|^\.git' || true; } > "$SERVER_FILES"
           fi
 
           echo "=== Total files on server: $(wc -l < "$SERVER_FILES") ==="
@@ -664,6 +678,11 @@ jobs:
           SERVER_FILES="$RUNNER_TEMP/server_files.txt"
           FILTERED_FILES="$RUNNER_TEMP/to_download.txt"
           IGNORED_FILES="$RUNNER_TEMP/ignored.txt"
+
+          if [ ! -f "$SERVER_FILES" ]; then
+            echo "::error::File list was never produced — the listing step did not run (GRAB_MODE='${GRAB_MODE:-}', DEPLOY_METHOD='${DEPLOY_METHOD:-}', COMMITS_MODE='${COMMITS_MODE:-}')." >&2
+            exit 1
+          fi
 
           if [ -n "$LOCAL_DIR" ]; then
             sed "s|^|$LOCAL_DIR/|" "$SERVER_FILES" > "$RUNNER_TEMP/server_files_prefixed.txt"
@@ -771,13 +790,38 @@ jobs:
             DEST_DIR="./"
           fi
 
+          RC=0
           rsync -avz --progress \
             -e "$GT_SSH" \
             --files-from="$FILTERED_FILES" \
             --ignore-missing-args \
             --no-perms --no-owner --no-group \
             --copy-links \
-            "$DEPLOY_USER@$DEPLOY_HOST:${DEPLOY_PATH%/}/" "$DEST_DIR"
+            "$DEPLOY_USER@$DEPLOY_HOST:${DEPLOY_PATH%/}/" "$DEST_DIR" || RC=$?
+
+          case "$RC" in
+            0) ;;
+            23|24)
+              echo "::warning::rsync finished with code $RC (some files were missing or vanished) — continuing with what was actually transferred"
+              ;;
+            *)
+              exit "$RC"
+              ;;
+          esac
+
+          if [ "$COMMITS_MODE" = "true" ]; then
+            > "$RUNNER_TEMP/server_files.txt"
+            while IFS= read -r file; do
+              [ -z "$file" ] && continue
+              if [ -n "$LOCAL_DIR" ]; then
+                local_path="./$LOCAL_DIR/$file"
+              else
+                local_path="./$file"
+              fi
+              if [ -f "$local_path" ]; then echo "$file" >> "$RUNNER_TEMP/server_files.txt"; fi
+            done < "$RUNNER_TEMP/commits_original.txt"
+            echo "=== Files actually downloaded from server: $(wc -l < "$RUNNER_TEMP/server_files.txt") ==="
+          fi
 
       - name: Copy source files
         if: ${{ env.GRAB_MODE == 'repo' && env.NOTHING_TO_SYNC != 'true' }}
@@ -819,23 +863,31 @@ jobs:
         run: |
           set -euo pipefail
 
-          SERVER_FILES="$RUNNER_TEMP/server_files.txt"
+          export LC_ALL=C
 
-          git ls-files | while IFS= read -r tracked; do
-            if [ -n "$LOCAL_DIR" ]; then
-              if [[ "$tracked" == "$LOCAL_DIR/"* ]]; then
-                rel="${tracked#"$LOCAL_DIR/"}"
-              else
-                continue
-              fi
-            else
-              rel="$tracked"
-            fi
-            if ! grep -qxF "$rel" "$SERVER_FILES"; then
-              echo "Removing: $tracked"
-              rm -f "$tracked"
-            fi
-          done
+          SERVER_FILES="$RUNNER_TEMP/server_files.txt"
+          TRACKED_REL="$RUNNER_TEMP/tracked_rel.txt"
+
+          if [ ! -s "$SERVER_FILES" ]; then
+            echo "::error::Source file list is empty — refusing to apply mirror deletions, this would delete every tracked file." >&2
+            exit 1
+          fi
+
+          if [ -n "$LOCAL_DIR" ]; then
+            git ls-files -- "$LOCAL_DIR" \
+              | sed "s|^$LOCAL_DIR/||" \
+              | { grep -vE '^\.git' || true; } > "$TRACKED_REL"
+          else
+            git ls-files | { grep -vE '^\.git' || true; } > "$TRACKED_REL"
+          fi
+
+          comm -23 <(sort -u "$TRACKED_REL") <(sort -u "$SERVER_FILES") \
+            | while IFS= read -r rel; do
+                [ -z "$rel" ] && continue
+                if [ -n "$LOCAL_DIR" ]; then tracked="$LOCAL_DIR/$rel"; else tracked="$rel"; fi
+                echo "Removing: $tracked"
+                rm -f "$tracked"
+              done
 
       - name: Commit and push
         if: ${{ env.NOTHING_TO_SYNC != 'true' }}
@@ -858,6 +910,11 @@ jobs:
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
           if [ "$COMMITS_MODE" = "true" ] && [ -n "${BASE_COMMIT:-}" ]; then
+            if [ ! -f "$RUNNER_TEMP/server_files.txt" ]; then
+              echo "::error::File list is missing at commit time — the download step did not produce it." >&2
+              exit 1
+            fi
+
             PAYLOAD="$RUNNER_TEMP/payload"
             rm -rf "$PAYLOAD"; mkdir -p "$PAYLOAD"
             while IFS= read -r file; do
@@ -883,7 +940,7 @@ jobs:
           fi
 
           if [ "$COMMITS_MODE" = "true" ] && [ "${DEPLOY_MIRROR}" = "true" ]; then
-            comm -23 <(sort "$RUNNER_TEMP/commits_original.txt") <(sort "$RUNNER_TEMP/server_files.txt") \
+            comm -23 <(LC_ALL=C sort -u "$RUNNER_TEMP/commits_original.txt") <(LC_ALL=C sort -u "$RUNNER_TEMP/server_files.txt") \
               | while IFS= read -r file; do
                   [ -z "$file" ] && continue
                   if [ -n "$LOCAL_DIR" ]; then lp="./$LOCAL_DIR/$file"; else lp="./$file"; fi
