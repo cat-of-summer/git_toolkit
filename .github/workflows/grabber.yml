@@ -95,11 +95,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          lower() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
-          trim() { printf '%s' "${1:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          lower() { printf '%s' "${1:-}" | tr -d '\r' | tr '[:upper:]' '[:lower:]'; }
+          trim() { printf '%s' "${1:-}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
 
-          DEPLOY_METHOD="$(lower "${DEPLOY_METHOD_RAW:-}")"
-          DEPLOY_MIRROR="$(lower "${DEPLOY_MIRROR_RAW:-}")"
+          DEPLOY_METHOD="$(lower "$(trim "${DEPLOY_METHOD_RAW:-}")")"
+          DEPLOY_MIRROR="$(lower "$(trim "${DEPLOY_MIRROR_RAW:-}")")"
 
           SOURCE_REPO="$(trim "${SOURCE_REPO_RAW:-}")"
           SOURCE_REF="$(trim "${SOURCE_REF_RAW:-}")"
@@ -578,6 +578,9 @@ jobs:
           set -euo pipefail
 
           SERVER_FILES="$RUNNER_TEMP/server_files.txt"
+          : > "$SERVER_FILES"
+
+          echo "listing: mode=$GRAB_MODE method='$DEPLOY_METHOD' commits=$COMMITS_MODE"
 
           if [ "$COMMITS_MODE" = "true" ]; then
             TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
@@ -591,10 +594,15 @@ jobs:
 
             elif [ "$DEPLOY_METHOD" = "ftp" ]; then
               cp "$TO_DOWNLOAD" "$SERVER_FILES"
+
+            else
+              echo "::error::Unsupported DEPLOY_METHOD='$DEPLOY_METHOD' in server mode — expected 'rsync' or 'ftp'." >&2
+              exit 1
             fi
 
             cp "$SERVER_FILES" "$TO_DOWNLOAD"
-            echo "=== Files from commits found on server: $(wc -l < "$SERVER_FILES") ==="
+            FOUND=$(wc -l < "$SERVER_FILES")
+            echo "=== Files from commits found on server: $FOUND ==="
             exit 0
           fi
 
@@ -627,9 +635,14 @@ jobs:
             { LC_ALL=C grep -v '/$' "$RUNNER_TEMP/server_files_raw.txt" || true; } \
               | LC_ALL=C sed "s|^${DEPLOY_PATH_STRIPPED}/||" \
               | { LC_ALL=C grep -vE '^$|^\.git' || true; } > "$SERVER_FILES"
+
+          else
+            echo "::error::Unsupported DEPLOY_METHOD='$DEPLOY_METHOD' in server mode — expected 'rsync' or 'ftp'." >&2
+            exit 1
           fi
 
-          echo "=== Total files on server: $(wc -l < "$SERVER_FILES") ==="
+          TOTAL=$(wc -l < "$SERVER_FILES")
+          echo "=== Total files on server: $TOTAL ==="
 
       - name: List source files
         if: ${{ env.GRAB_MODE == 'repo' }}
@@ -639,6 +652,7 @@ jobs:
           export LC_ALL=C
 
           SERVER_FILES="$RUNNER_TEMP/server_files.txt"
+          : > "$SERVER_FILES"
           PREFIX=""
           [ -n "$SOURCE_PATH" ] && PREFIX="$SOURCE_PATH/"
 
@@ -651,7 +665,8 @@ jobs:
             done < "$TO_DOWNLOAD"
 
             cp "$SERVER_FILES" "$TO_DOWNLOAD"
-            echo "=== Files from commits found in source: $(wc -l < "$SERVER_FILES") ==="
+            FOUND=$(wc -l < "$SERVER_FILES")
+            echo "=== Files from commits found in source: $FOUND ==="
             exit 0
           fi
 
@@ -667,7 +682,8 @@ jobs:
             git -C "$SRC_GIT" ls-files | grep -vE '^\.git' > "$SERVER_FILES" || true
           fi
 
-          echo "=== Total files in source: $(wc -l < "$SERVER_FILES") ==="
+          TOTAL=$(wc -l < "$SERVER_FILES")
+          echo "=== Total files in source: $TOTAL ==="
 
       - name: Filter files via .gitignore
         shell: bash
