@@ -3,6 +3,7 @@
 
 ## Папки
 
+- [snippets](snippets/)
 - [workflows](workflows/)
 
 <!-- DOCGEN:END -->

@@ -5,6 +5,7 @@
 
 - [.github](.github/)
 - [.gitignore](.gitignore/)
+- [tests](tests/)
 
 <!-- DOCGEN:END -->
 
