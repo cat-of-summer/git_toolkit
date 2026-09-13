@@ -1,0 +1,27 @@
+# имя | ACTION_TRIGGER | событие | REF_TYPE | ожидание
+# ожидание: run_ci,run_release,run_cd либо !error:<подстрока>
+
+умолчание молчит на пуше ветки | workflow_dispatch | push | branch | false,false,false
+умолчание молчит на пуше тега  | workflow_dispatch | push | tag    | false,false,false
+ручной запуск на ветке         | workflow_dispatch | workflow_dispatch | branch | true,false,true
+ручной запуск на теге          | workflow_dispatch | workflow_dispatch | tag    | true,true,true
+
+push на ветке                  | push | push | branch | true,false,true
+push на теге                   | push | push | tag    | true,true,true
+
+branch на ветке                | branch | push | branch | true,false,true
+branch на теге молчит          | branch | push | tag    | false,false,false
+
+tag на теге                    | tag | push | tag    | true,true,true
+tag на ветке молчит            | tag | push | branch | false,false,false
+
+ручной запуск при branch       | branch | workflow_dispatch | branch | true,false,true
+ручной запуск при tag          | tag    | workflow_dispatch | tag    | true,true,true
+
+PR при push                    | push    | pull_request | pr | true,false,false
+PR при tag                     | tag     | pull_request | pr | true,false,false
+PR при branch                  | branch  | pull_request | pr | true,false,false
+
+release не принимается         | release  | push | tag    | !error:Invalid ACTION_TRIGGER
+dispatch не принимается        | dispatch | push | branch | !error:Invalid ACTION_TRIGGER
+опечатка не принимается        | pushh    | push | branch | !error:Invalid ACTION_TRIGGER

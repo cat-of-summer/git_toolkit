@@ -69,12 +69,199 @@ permissions:
   contents: write
 
 jobs:
-  grab:
+  resolve-ref:
     runs-on: ubuntu-latest
 
-    environment: ${{ github.ref_name }}
+    outputs:
+      ref_type: ${{ steps.ref.outputs.ref_type }}
+      ref_name: ${{ steps.ref.outputs.ref_name }}
+      ref_name_norm: ${{ steps.ref.outputs.ref_name_norm }}
+      ref_commit: ${{ steps.ref.outputs.ref_commit }}
+      ref_branch: ${{ steps.env.outputs.ref_branch }}
+      environment: ${{ steps.env.outputs.environment }}
+
+    steps:
+      - name: Resolve ref
+        id: ref
+        shell: bash
+        env:
+          MULTIPLE_PACKAGES: ${{ vars.MULTIPLE_PACKAGES }}
+        run: |
+          set -euo pipefail
+
+          # >>> .github/snippets/resolve-ref.sh
+          __lower() { printf '%s' "${1:-}" | tr -d '\r' | tr '[:upper:]' '[:lower:]'; }
+          __trim()  { printf '%s' "${1:-}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          __slug()  { printf '%s' "${1:-}" | tr -d '\r' | tr '/' '-'; }
+          __fail()  { echo "::error::$1" >&2; exit 1; }
+
+          MULTIPLE_PACKAGES="$(__lower "$(__trim "${MULTIPLE_PACKAGES:-}")")"
+
+          __event="${GITHUB_EVENT_NAME:-}"
+          __raw_type="$(__trim "${GITHUB_REF_TYPE:-}")"
+          __raw_name="$(__trim "${GITHUB_REF_NAME:-}")"
+
+          REF_TYPE=""
+          REF_NAME="$__raw_name"
+          REF_NAME_NORM=""
+          REF_BRANCH=""
+          REF_COMMIT="$(__trim "${GITHUB_SHA:-}")"
+          REF_TAG=""
+          REF_TAG_BRANCH=""
+
+          case "$__event" in
+            pull_request|pull_request_target)
+              REF_TYPE="pr"
+              __pr="$(__trim "${PR_NUMBER:-}")"
+              if [ -z "$__pr" ]; then __pr="${__raw_name%%/*}"; fi
+              REF_NAME_NORM="pr-${__pr}"
+              REF_BRANCH="$(__slug "${PR_BASE_REF:-}")"
+              __head="$(__trim "${PR_HEAD_SHA:-}")"
+              if [ -n "$__head" ]; then REF_COMMIT="$__head"; fi
+              ;;
+
+            *)
+              if [ "$__raw_type" = "tag" ]; then
+                REF_TYPE="tag"
+
+                __prefix=""
+                __vpart="$__raw_name"
+                if [ "${__raw_name#*/}" != "$__raw_name" ]; then
+                  __prefix="${__raw_name%/*}"
+                  __vpart="${__raw_name##*/}"
+                fi
+
+                if ! printf '%s' "$__vpart" | grep -qE '^v[0-9]+(\.[0-9]+)*$'; then
+                  __fail "Tag '$__vpart' is not a v-version tag (expected v#, v#.#, v#.#.#)."
+                fi
+                if [ "$MULTIPLE_PACKAGES" = "true" ] && [ -z "$__prefix" ]; then
+                  __fail "MULTIPLE_PACKAGES=true: the tag must have the form '{branch}/vX.Y.Z' (got '$__raw_name')."
+                fi
+                if [ "$MULTIPLE_PACKAGES" != "true" ] && [ -n "$__prefix" ]; then
+                  __fail "MULTIPLE_PACKAGES is off: the tag must have the form 'vX.Y.Z' without a branch prefix (got '$__raw_name'). Set MULTIPLE_PACKAGES=true to use '{branch}/vX.Y.Z' tags."
+                fi
+
+                REF_TAG="$__vpart"
+                REF_TAG_BRANCH="$__prefix"
+                REF_BRANCH="$(__slug "$__prefix")"
+                if [ -n "$__prefix" ]; then
+                  REF_NAME_NORM="${REF_BRANCH}-${__vpart#v}"
+                else
+                  REF_NAME_NORM="${__vpart#v}"
+                fi
+              else
+                REF_TYPE="branch"
+                REF_BRANCH="$(__slug "$__raw_name")"
+                REF_NAME_NORM="$REF_BRANCH"
+              fi
+              ;;
+          esac
+
+          if [ -z "$REF_NAME" ]; then __fail "Cannot determine what was pushed: GITHUB_REF_NAME is empty."; fi
+          if [ -z "$REF_COMMIT" ]; then __fail "Cannot determine the commit: GITHUB_SHA is empty."; fi
+
+          echo "ref_type=$REF_TYPE ref_name=$REF_NAME ref_name_norm=$REF_NAME_NORM ref_branch=${REF_BRANCH:-<by history>} ref_commit=$REF_COMMIT"
+
+          {
+            echo "ref_type=$REF_TYPE"
+            echo "ref_name=$REF_NAME"
+            echo "ref_name_norm=$REF_NAME_NORM"
+            echo "ref_branch=$REF_BRANCH"
+            echo "ref_commit=$REF_COMMIT"
+            echo "ref_tag=$REF_TAG"
+            echo "ref_tag_branch=$REF_TAG_BRANCH"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "REF_TYPE=$REF_TYPE"
+            echo "REF_NAME=$REF_NAME"
+            echo "REF_NAME_NORM=$REF_NAME_NORM"
+            echo "REF_BRANCH=$REF_BRANCH"
+            echo "REF_COMMIT=$REF_COMMIT"
+          } >> "$GITHUB_ENV"
+
+          unset -f __lower __trim __slug __fail
+          unset __event __raw_type __raw_name __pr __head __prefix __vpart
+          # <<< .github/snippets/resolve-ref.sh
+
+      - name: Checkout
+        if: ${{ steps.ref.outputs.ref_type == 'tag' }}
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.ref.outputs.ref_name }}
+
+      - name: Resolve environment
+        id: env
+        shell: bash
+        env:
+          MULTIPLE_PACKAGES: ${{ vars.MULTIPLE_PACKAGES }}
+          REF_TYPE: ${{ steps.ref.outputs.ref_type }}
+          REF_NAME: ${{ steps.ref.outputs.ref_name }}
+          REF_BRANCH: ${{ steps.ref.outputs.ref_branch }}
+          REF_COMMIT: ${{ steps.ref.outputs.ref_commit }}
+          REF_TAG_BRANCH: ${{ steps.ref.outputs.ref_tag_branch }}
+        run: |
+          set -euo pipefail
+
+          # >>> .github/snippets/resolve-env.sh
+          __slug() { printf '%s' "${1:-}" | tr -d '\r' | tr '/' '-'; }
+          __trim() { printf '%s' "${1:-}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          __fail() { echo "::error::$1" >&2; exit 1; }
+
+          MULTIPLE_PACKAGES="$(__trim "${MULTIPLE_PACKAGES:-}" | tr '[:upper:]' '[:lower:]')"
+          __input_env="$(__trim "${INPUT_ENVIRONMENT:-}")"
+
+          if [ -n "$__input_env" ]; then
+            REF_BRANCH="$(__slug "$__input_env")"
+            echo "Environment overridden by the workflow_dispatch input."
+
+          elif [ -z "${REF_BRANCH:-}" ]; then
+            __found="$(git branch -r --contains "$REF_COMMIT" 2>/dev/null | grep -v HEAD | head -1 | sed 's#.*origin/##' | tr -d '[:space:]' || true)"
+            if [ -z "$__found" ]; then
+              __fail "Cannot tell which branch tag '$REF_NAME' was cut from: commit $REF_COMMIT is not on any remote branch. Checkout with fetch-depth: 0 is required."
+            fi
+            REF_BRANCH="$(__slug "$__found")"
+
+          elif [ "$REF_TYPE" = "tag" ] && [ -n "${REF_TAG_BRANCH:-}" ]; then
+            if ! git ls-remote --exit-code --heads origin "$REF_TAG_BRANCH" >/dev/null 2>&1; then
+              __fail "Branch '$REF_TAG_BRANCH' from tag '$REF_NAME' not found."
+            fi
+          fi
+
+          __suffix=""
+          if [ "$MULTIPLE_PACKAGES" = "true" ]; then __suffix="-${REF_BRANCH}"; fi
+
+          if [ -n "$__suffix" ]; then
+            echo "Environment resolved to: '$REF_BRANCH' (package suffix '$__suffix')"
+          else
+            echo "Environment resolved to: '$REF_BRANCH'"
+          fi
+
+          {
+            echo "ref_branch=$REF_BRANCH"
+            echo "environment=$REF_BRANCH"
+            echo "pkg_suffix=$__suffix"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "REF_BRANCH=$REF_BRANCH" >> "$GITHUB_ENV"
+
+          unset -f __slug __trim __fail
+          unset __input_env __found __suffix
+          # <<< .github/snippets/resolve-env.sh
+
+  grab:
+    needs: resolve-ref
+    runs-on: ubuntu-latest
+
+    environment: ${{ needs.resolve-ref.outputs.environment }}
 
     env:
+      REF_TYPE: ${{ needs.resolve-ref.outputs.ref_type }}
+      REF_NAME: ${{ needs.resolve-ref.outputs.ref_name }}
+      REF_NAME_NORM: ${{ needs.resolve-ref.outputs.ref_name_norm }}
+      REF_BRANCH: ${{ needs.resolve-ref.outputs.ref_branch }}
+      REF_COMMIT: ${{ needs.resolve-ref.outputs.ref_commit }}
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
       DEPLOY_USER: ${{ vars.DEPLOY_USER }}
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
@@ -326,8 +513,15 @@ jobs:
           fi
 
           SOURCE_COMMIT=""
+          SOURCE_REF_TYPE=""
           for cand in "refs/remotes/origin/$REF" "refs/tags/$REF" "$REF" FETCH_HEAD; do
             if SOURCE_COMMIT=$(git -C "$SRC" rev-parse --verify --quiet "${cand}^{commit}"); then
+              case "$cand" in
+                refs/remotes/origin/*) SOURCE_REF_TYPE=branch ;;
+                refs/tags/*)           SOURCE_REF_TYPE=tag ;;
+                FETCH_HEAD)            SOURCE_REF_TYPE=fetched ;;
+                *)                     SOURCE_REF_TYPE=commit ;;
+              esac
               break
             fi
             SOURCE_COMMIT=""
@@ -340,16 +534,18 @@ jobs:
 
           git -C "$SRC" checkout -q --detach "$SOURCE_COMMIT"
 
-          echo "Source $SOURCE_URL ref '$REF' = $SOURCE_COMMIT"
+          echo "Source $SOURCE_URL $SOURCE_REF_TYPE '$REF' = $SOURCE_COMMIT"
           git -C "$SRC" --no-pager log -1 --oneline
 
           {
             echo "SRC_GIT=$SRC"
             echo "SOURCE_COMMIT=$SOURCE_COMMIT"
-            echo "SOURCE_REF_RESOLVED=$REF"
+            echo "SOURCE_REF_TYPE=$SOURCE_REF_TYPE"
+            echo "SOURCE_REF_NAME=$REF"
+            echo "SOURCE_REF_NAME_NORM=$(printf '%s' "$REF" | tr '/' '-')"
           } >> "$GITHUB_ENV"
 
-      - name: Resolve REF_COMMIT
+      - name: Resolve TARGET_COMMIT
         shell: bash
         run: |
           set -euo pipefail
@@ -357,12 +553,12 @@ jobs:
           SRC_GIT="${SRC_GIT:-.}"
 
           if [ -z "$COMMITS" ]; then
-            REF_COMMIT=$(git -C "$SRC_GIT" rev-parse HEAD)
-            echo "No commits specified — REF_COMMIT = HEAD = $REF_COMMIT"
+            TARGET_COMMIT=$(git -C "$SRC_GIT" rev-parse HEAD)
+            echo "No commits specified — TARGET_COMMIT = HEAD = $TARGET_COMMIT"
           else
             readarray -t COMMITS_ARR < <(echo "$COMMITS" | tr ',; \t\r\n' '\n' | tr -s '\n' | grep -v '^[[:space:]]*$')
-            REF_COMMIT=$(git -C "$SRC_GIT" log --no-walk --format='%ct %H' "${COMMITS_ARR[@]}" | sort -k1 -nr | head -1 | awk '{print $2}')
-            echo "Resolved REF_COMMIT (latest by committer-date) = $REF_COMMIT"
+            TARGET_COMMIT=$(git -C "$SRC_GIT" log --no-walk --format='%ct %H' "${COMMITS_ARR[@]}" | sort -k1 -nr | head -1 | awk '{print $2}')
+            echo "Resolved TARGET_COMMIT (latest by committer-date) = $TARGET_COMMIT"
 
             if [ "${#COMMITS_ARR[@]}" -eq 1 ]; then
               MERGE_BASE="${COMMITS_ARR[0]}"
@@ -392,7 +588,7 @@ jobs:
             fi
           fi
 
-          echo "REF_COMMIT=$REF_COMMIT" >> "$GITHUB_ENV"
+          echo "TARGET_COMMIT=$TARGET_COMMIT" >> "$GITHUB_ENV"
 
       - name: Resolve commits files
         shell: bash
@@ -448,17 +644,17 @@ jobs:
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             if [ -z "$STRIP_DIR" ]; then
-              if git -C "$SRC_GIT" cat-file -e "$REF_COMMIT:$file" 2>/dev/null; then
+              if git -C "$SRC_GIT" cat-file -e "$TARGET_COMMIT:$file" 2>/dev/null; then
                 echo "$file" >> "$TO_DOWNLOAD"
               else
-                echo "::warning::Skipping '$file': not present at REF_COMMIT $REF_COMMIT"
+                echo "::warning::Skipping '$file': not present at TARGET_COMMIT $TARGET_COMMIT"
               fi
             elif [[ "$file" == "$STRIP_DIR/"* ]]; then
               stripped="${file#"$STRIP_DIR/"}"
-              if git -C "$SRC_GIT" cat-file -e "$REF_COMMIT:$file" 2>/dev/null; then
+              if git -C "$SRC_GIT" cat-file -e "$TARGET_COMMIT:$file" 2>/dev/null; then
                 echo "$stripped" >> "$TO_DOWNLOAD"
               else
-                echo "::warning::Skipping '$file': not present at REF_COMMIT $REF_COMMIT"
+                echo "::warning::Skipping '$file': not present at TARGET_COMMIT $TARGET_COMMIT"
               fi
             fi
           done < "$ALL_FILES"
@@ -466,7 +662,7 @@ jobs:
           sort -u -o "$TO_DOWNLOAD" "$TO_DOWNLOAD"
           cp "$TO_DOWNLOAD" "$RUNNER_TEMP/commits_original.txt"
 
-          echo "=== Files from commits (alive at REF_COMMIT): $(wc -l < "$TO_DOWNLOAD") ==="
+          echo "=== Files from commits (alive at TARGET_COMMIT): $(wc -l < "$TO_DOWNLOAD") ==="
 
           if ! [ -s "$TO_DOWNLOAD" ]; then
             echo "::warning::No files found in the specified commits"
@@ -672,7 +868,7 @@ jobs:
 
           if [ -n "$SOURCE_PATH" ]; then
             if [ -z "$(git -C "$SRC_GIT" ls-files -- "$SOURCE_PATH")" ]; then
-              echo "::error::source_path '$SOURCE_PATH' holds no tracked files in $SOURCE_URL at ref '$SOURCE_REF_RESOLVED'." >&2
+              echo "::error::source_path '$SOURCE_PATH' holds no tracked files in $SOURCE_URL at ref '$SOURCE_REF_NAME'." >&2
               exit 1
             fi
             git -C "$SRC_GIT" ls-files -- "$SOURCE_PATH" \
@@ -908,14 +1104,13 @@ jobs:
       - name: Commit and push
         if: ${{ env.NOTHING_TO_SYNC != 'true' }}
         env:
-          GITHUB_REF_NAME: ${{ github.ref_name }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
 
           TIMESTAMP=$(date -u +%Y-%m-%d_%H-%M-%S)
-          BRANCH="sync/${GITHUB_REF_NAME}_${TIMESTAMP}"
+          BRANCH="sync/${REF_NAME_NORM}_${TIMESTAMP}"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -981,7 +1176,7 @@ jobs:
           fi
 
           if [ "$GRAB_MODE" = "repo" ]; then
-            SOURCE_DESC="${SOURCE_URL}@${SOURCE_REF_RESOLVED:-HEAD}"
+            SOURCE_DESC="${SOURCE_URL}@${SOURCE_REF_NAME:-HEAD}"
           else
             SOURCE_DESC="server"
           fi

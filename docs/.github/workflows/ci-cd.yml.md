@@ -63,18 +63,28 @@
 
 | Переменная | По умолчанию | Значения / смысл |
 |---|---|---|
-| `ACTION_TRIGGER` | `workflow_dispatch` | Когда пайплайн «активен»: `workflow_dispatch` / `push` / `release`. Любое другое значение — ошибка. Устаревшее `dispatch` принимается с предупреждением |
+| `ACTION_TRIGGER` | `workflow_dispatch` | Когда пайплайн «активен»: `workflow_dispatch` / `push` / `branch` / `tag`. Любое другое значение — ошибка |
 
 | `ACTION_TRIGGER` | Событие | ci | release | cd |
 |---|---|:--:|:--:|:--:|
 | `workflow_dispatch` (по умолчанию) | push ветки/тега | — | — | — |
-| `workflow_dispatch` | ручной запуск на ветке | ✔ | — | ✔ |
-| `workflow_dispatch` | ручной запуск на теге | ✔ | ✔ | ✔ |
 | `push` | push ветки | ✔ | — | ✔ |
 | `push` | push тега | ✔ | ✔ | ✔ |
-| `release` | push ветки | — | — | — |
-| `release` | push тега | ✔ | ✔ | ✔ |
+| `branch` | push ветки | ✔ | — | ✔ |
+| `branch` | push тега | — | — | — |
+| `tag` | push ветки | — | — | — |
+| `tag` | push тега | ✔ | ✔ | ✔ |
+| любой | ручной запуск на ветке | ✔ | — | ✔ |
+| любой | ручной запуск на теге | ✔ | ✔ | ✔ |
 | любой | pull request | ✔ | — | — |
+
+`push` — общий режим, `branch` и `tag` — его половины: первый игнорирует теги, второй ветки.
+`ACTION_TRIGGER` управляет **только push-событиями**: ручной запуск активен в любом режиме,
+потому что там решение принимает человек, а не конфигурация.
+
+> ⚠️ Значения `release` и `dispatch` больше не принимаются: `release` переименован в `tag`,
+> `dispatch` — в `workflow_dispatch`. Раньше они работали с предупреждением, теперь запуск
+> падает с `Invalid ACTION_TRIGGER`. Замените значение в переменной.
 
 Дополнительные условия поверх таблицы:
 
@@ -82,6 +92,50 @@
 - `release` возможен только на теге — без тега публиковать нечего.
 - `cd` запускается, только если заданы **все четыре**: `DEPLOY_HOST` + `DEPLOY_USER` +
   `DEPLOY_PATH` + секрет `DEPLOY_KEY`. И никогда — на pull request.
+
+---
+
+## Переменные ref: что именно запущено
+
+Один и тот же набор во всех четырёх workflow toolkit-а. Считается джобой `resolve-ref` первым
+делом, до всего остального, и дальше нигде не пересчитывается. Доступен как выходы джобы
+(`needs.resolve-ref.outputs.*`, нижний регистр) и как переменные окружения в шагах и в
+пользовательских командах — `BUILD_COMMAND`, `CI_COMMAND`, `BEFORE_/AFTER_DEPLOY_COMMAND`.
+
+| Переменная | push ветки | push тега | pull request |
+|---|---|---|---|
+| `REF_TYPE` | `branch` | `tag` | `pr` |
+| `REF_NAME` | `release/1.x` | `v1.2.3` или `main/v1.2.3` — как запушено, годится для `git checkout` | `42/merge` |
+| `REF_NAME_NORM` | `release-1.x` | `1.2.3`, а при `MULTIPLE_PACKAGES=true` — `main-1.2.3` | `pr-42` |
+| `REF_BRANCH` | `release-1.x` | ветка тега: из префикса либо по коммиту | база PR |
+| `REF_COMMIT` | `github.sha` | `github.sha` | sha головы PR, а не merge-коммита |
+
+`REF_NAME_NORM` — готовый идентификатор: слешей в нём нет, префикса `v` тоже. Его можно
+подставлять в тег образа, в имя артефакта, в имя ветки. Всё остальное собирается из него:
+
+```
+BUILD_COMMAND=docker build -t myapp:$REF_NAME_NORM .
+CI_COMMAND=npm test -- --reporter-option "title=$REF_NAME_NORM@$REF_COMMIT"
+```
+
+Почему `REF_NAME_NORM`, а не `REF_NAME`: ветка `release/1.x` в имени Environment, в теге образа
+и в имени ветки `sync/…` — это три разных места, где слеш означает вложенность и ломает смысл.
+Нормализованное имя одно и то же во всех трёх.
+
+Почему в multi-режиме туда попадает ветка: один и тот же `v1.2.3` выпускается из каждой ветки,
+и без неё `main-1.2.3` и `dev-1.2.3` слиплись бы в один идентификатор.
+
+`REF_BRANCH` совпадает с именем Environment. У плоского тега `v1.2.3` ветки в самой строке ref
+нет — она определяется по истории (`git branch -r --contains`), поэтому джоба `resolve-ref`
+делает checkout с `fetch-depth: 0`. Коммит тега, не лежащий ни на одной ветке, — ошибка, а не
+пустое окружение.
+
+**Эти имена защищены.** Переменная проекта с именем `REF_NAME` не перекроет контракт: шаг
+«Collect vars & secrets» отфильтровывает их вместе с `GITHUB_*` и `RUNNER_*`.
+
+**`TARGET_COMMIT` — не из этого набора.** Так называется коммит, из которого берутся файлы при
+выборочном деплое (`SCOPE=selective`) и в grabber. Раньше он назывался `REF_COMMIT` и занимал
+имя, нужное контракту.
 
 ---
 
@@ -402,6 +456,12 @@ CACHE_KEY_FILES=app/data/package-lock.json
 
 Допустимы `v#`, `v#.#`, `v#.#.#`. Недостающие части версии дополняются нулями: `v1` → `1.0.0`.
 
+Регламент один на весь toolkit и обязателен во всех четырёх workflow, а не только там, где
+что-то публикуется: `resolve-ref` останавливает запуск на первом же шаге. Теги вроде `latest`,
+`stable` или `release-2026-09` не принимаются нигде — послаблений и переключателей нет.
+Причина простая: тег, не укладывающийся в регламент, иначе доезжает до `npm version` или до
+имени образа тремя джобами позже и оборачивается кривым именем, которое уже опубликовано.
+
 ```
 git tag v1.0.0 && git push origin v1.0.0
 # либо при MULTIPLE_PACKAGES=true:
@@ -654,7 +714,7 @@ AFTER_DEPLOY_COMMAND=php artisan migrate && php artisan up
 
 **Бинарники Linux + Windows в Release:**
 ```
-ACTION_TRIGGER=release
+ACTION_TRIGGER=tag
 RUNS_ON=ubuntu-latest,windows-latest
 TOOLCHAIN=python:3.12
 BUILD_COMMAND=pip install pyinstaller && pyinstaller --onefile --name "app-$RUNNER_OS" main.py
@@ -663,7 +723,7 @@ RELEASE_FILES=dist/app-*
 
 **Docker-образ из собранного + деплой командой:**
 ```
-ACTION_TRIGGER=release
+ACTION_TRIGGER=tag
 TOOLCHAIN=node:24
 BUILD_COMMAND=npm ci && npm run build
 PUBLISH_METHOD=docker
@@ -677,7 +737,7 @@ AFTER_DEPLOY_COMMAND=docker compose pull && docker compose up -d
 
 **Только релиз с публикацией в npm (без деплоя):**
 ```
-ACTION_TRIGGER=release
+ACTION_TRIGGER=tag
 TOOLCHAIN=node:24
 BUILD_COMMAND=npm ci && npm run build
 PUBLISH_METHOD=npm
@@ -694,9 +754,14 @@ PUBLISH_METHOD=npm
 - **`cd` серая при `ACTION_TRIGGER=push`.** Заданы не все из `DEPLOY_HOST` / `DEPLOY_USER` /
   `DEPLOY_PATH` + секрет `DEPLOY_KEY`.
 - **Переменные не подхватываются.** Они заданы не в том Environment: имя окружения печатается в
-  логе `resolve-branch` (`Environment resolved to: …`).
+  логе `resolve-ref` (`Environment resolved to: …`).
 - **Ошибка на формате тега.** Тег не соответствует режиму `MULTIPLE_PACKAGES` — в сообщении указано,
-  какая форма ожидается.
+  какая форма ожидается. Регламент проверяется в `resolve-ref`, до всей остальной работы, и
+  одинаков во всех четырёх workflow toolkit-а.
+- **`Invalid ACTION_TRIGGER`.** Значения `release` и `dispatch` больше не принимаются: первое
+  переименовано в `tag`, второе в `workflow_dispatch`.
+- **`Cannot tell which branch tag '…' was cut from`.** Коммит плоского тега не лежит ни на одной
+  удалённой ветке. Обычно это тег на коммите, которого нет в `origin`.
 - **`Branch '...' from tag not found`.** В теге `{branch}/vX.Y.Z` указана несуществующая ветка.
 - **Файлы не попали в Release.** Проверь `RELEASE_FILES`; собранных файлов нет в дереве, если `ci`
   не запускалась (`run_ci=false`).

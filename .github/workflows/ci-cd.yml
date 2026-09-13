@@ -111,80 +111,132 @@ permissions:
 
 jobs:
 
-  resolve-branch:
+  resolve-ref:
     runs-on: ubuntu-latest
 
     outputs:
+      ref_type: ${{ steps.ref.outputs.ref_type }}
+      ref_name: ${{ steps.ref.outputs.ref_name }}
+      ref_name_norm: ${{ steps.ref.outputs.ref_name_norm }}
+      ref_commit: ${{ steps.ref.outputs.ref_commit }}
+      ref_branch: ${{ steps.env.outputs.ref_branch }}
+      ref_tag: ${{ steps.ref.outputs.ref_tag }}
       environment: ${{ steps.env.outputs.environment }}
       pkg_suffix: ${{ steps.env.outputs.pkg_suffix }}
-      is_tag: ${{ steps.resolve.outputs.is_tag }}
-      ref: ${{ steps.resolve.outputs.ref }}
-      tag: ${{ steps.resolve.outputs.tag }}
 
     steps:
-      - name: Resolve & validate tag
-        id: resolve
+      - name: Resolve ref
+        id: ref
         shell: bash
         env:
           MULTIPLE_PACKAGES: ${{ vars.MULTIPLE_PACKAGES }}
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
 
-          MULTIPLE_PACKAGES="$(printf '%s' "${MULTIPLE_PACKAGES:-}" | tr '[:upper:]' '[:lower:]')"
+          # >>> .github/snippets/resolve-ref.sh
+          __lower() { printf '%s' "${1:-}" | tr -d '\r' | tr '[:upper:]' '[:lower:]'; }
+          __trim()  { printf '%s' "${1:-}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          __slug()  { printf '%s' "${1:-}" | tr -d '\r' | tr '/' '-'; }
+          __fail()  { echo "::error::$1" >&2; exit 1; }
 
-          if [ "$REF_TYPE" != "tag" ]; then
-            echo "Ref '$REF_NAME' is not a tag — the release part of the pipeline does not apply."
-            {
-              echo "is_tag=false"
-              echo "ref="
-              echo "tag="
-              echo "branch_explicit="
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          MULTIPLE_PACKAGES="$(__lower "$(__trim "${MULTIPLE_PACKAGES:-}")")"
 
-          FULL_TAG="$REF_NAME"
-          if [[ "$FULL_TAG" == */* ]]; then
-            BRANCH_EXPLICIT="${FULL_TAG%/*}"
-            VER_TAG="${FULL_TAG##*/}"
-          else
-            BRANCH_EXPLICIT=""
-            VER_TAG="$FULL_TAG"
-          fi
+          __event="${GITHUB_EVENT_NAME:-}"
+          __raw_type="$(__trim "${GITHUB_REF_TYPE:-}")"
+          __raw_name="$(__trim "${GITHUB_REF_NAME:-}")"
 
-          if [[ ! "$VER_TAG" =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then
-            echo "::error::Tag '$VER_TAG' is not a v-version tag (expected v#, v#.#, v#.#.#)." >&2
-            exit 1
-          fi
+          REF_TYPE=""
+          REF_NAME="$__raw_name"
+          REF_NAME_NORM=""
+          REF_BRANCH=""
+          REF_COMMIT="$(__trim "${GITHUB_SHA:-}")"
+          REF_TAG=""
+          REF_TAG_BRANCH=""
 
-          if [ "${MULTIPLE_PACKAGES:-}" = "true" ]; then
-            if [ -z "$BRANCH_EXPLICIT" ]; then
-              echo "::error::MULTIPLE_PACKAGES=true: the tag must have the form '{branch}/vX.Y.Z' (got '$FULL_TAG')." >&2
-              exit 1
-            fi
-          else
-            if [ -n "$BRANCH_EXPLICIT" ]; then
-              echo "::error::MULTIPLE_PACKAGES is off: the tag must have the form 'vX.Y.Z' without a branch prefix (got '$FULL_TAG'). Set MULTIPLE_PACKAGES=true to use '{branch}/vX.Y.Z' tags." >&2
-              exit 1
-            fi
-          fi
+          case "$__event" in
+            pull_request|pull_request_target)
+              REF_TYPE="pr"
+              __pr="$(__trim "${PR_NUMBER:-}")"
+              if [ -z "$__pr" ]; then __pr="${__raw_name%%/*}"; fi
+              REF_NAME_NORM="pr-${__pr}"
+              REF_BRANCH="$(__slug "${PR_BASE_REF:-}")"
+              __head="$(__trim "${PR_HEAD_SHA:-}")"
+              if [ -n "$__head" ]; then REF_COMMIT="$__head"; fi
+              ;;
 
-          echo "Resolved tag: $FULL_TAG (version: $VER_TAG, branch: ${BRANCH_EXPLICIT:-auto})"
+            *)
+              if [ "$__raw_type" = "tag" ]; then
+                REF_TYPE="tag"
+
+                __prefix=""
+                __vpart="$__raw_name"
+                if [ "${__raw_name#*/}" != "$__raw_name" ]; then
+                  __prefix="${__raw_name%/*}"
+                  __vpart="${__raw_name##*/}"
+                fi
+
+                if ! printf '%s' "$__vpart" | grep -qE '^v[0-9]+(\.[0-9]+)*$'; then
+                  __fail "Tag '$__vpart' is not a v-version tag (expected v#, v#.#, v#.#.#)."
+                fi
+                if [ "$MULTIPLE_PACKAGES" = "true" ] && [ -z "$__prefix" ]; then
+                  __fail "MULTIPLE_PACKAGES=true: the tag must have the form '{branch}/vX.Y.Z' (got '$__raw_name')."
+                fi
+                if [ "$MULTIPLE_PACKAGES" != "true" ] && [ -n "$__prefix" ]; then
+                  __fail "MULTIPLE_PACKAGES is off: the tag must have the form 'vX.Y.Z' without a branch prefix (got '$__raw_name'). Set MULTIPLE_PACKAGES=true to use '{branch}/vX.Y.Z' tags."
+                fi
+
+                REF_TAG="$__vpart"
+                REF_TAG_BRANCH="$__prefix"
+                REF_BRANCH="$(__slug "$__prefix")"
+                if [ -n "$__prefix" ]; then
+                  REF_NAME_NORM="${REF_BRANCH}-${__vpart#v}"
+                else
+                  REF_NAME_NORM="${__vpart#v}"
+                fi
+              else
+                REF_TYPE="branch"
+                REF_BRANCH="$(__slug "$__raw_name")"
+                REF_NAME_NORM="$REF_BRANCH"
+              fi
+              ;;
+          esac
+
+          if [ -z "$REF_NAME" ]; then __fail "Cannot determine what was pushed: GITHUB_REF_NAME is empty."; fi
+          if [ -z "$REF_COMMIT" ]; then __fail "Cannot determine the commit: GITHUB_SHA is empty."; fi
+
+          echo "ref_type=$REF_TYPE ref_name=$REF_NAME ref_name_norm=$REF_NAME_NORM ref_branch=${REF_BRANCH:-<by history>} ref_commit=$REF_COMMIT"
+
           {
-            echo "is_tag=true"
-            echo "ref=$FULL_TAG"
-            echo "tag=$VER_TAG"
-            echo "branch_explicit=$BRANCH_EXPLICIT"
+            echo "ref_type=$REF_TYPE"
+            echo "ref_name=$REF_NAME"
+            echo "ref_name_norm=$REF_NAME_NORM"
+            echo "ref_branch=$REF_BRANCH"
+            echo "ref_commit=$REF_COMMIT"
+            echo "ref_tag=$REF_TAG"
+            echo "ref_tag_branch=$REF_TAG_BRANCH"
           } >> "$GITHUB_OUTPUT"
 
+          {
+            echo "REF_TYPE=$REF_TYPE"
+            echo "REF_NAME=$REF_NAME"
+            echo "REF_NAME_NORM=$REF_NAME_NORM"
+            echo "REF_BRANCH=$REF_BRANCH"
+            echo "REF_COMMIT=$REF_COMMIT"
+          } >> "$GITHUB_ENV"
+
+          unset -f __lower __trim __slug __fail
+          unset __event __raw_type __raw_name __pr __head __prefix __vpart
+          # <<< .github/snippets/resolve-ref.sh
+
       - name: Checkout
-        if: ${{ steps.resolve.outputs.is_tag == 'true' }}
+        if: ${{ steps.ref.outputs.ref_type == 'tag' }}
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ steps.resolve.outputs.ref }}
+          ref: ${{ steps.ref.outputs.ref_name }}
 
       - name: Resolve environment
         id: env
@@ -192,52 +244,65 @@ jobs:
         env:
           MULTIPLE_PACKAGES: ${{ vars.MULTIPLE_PACKAGES }}
           INPUT_ENVIRONMENT: ${{ inputs.environment }}
-          EVENT: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
-          REF_NAME: ${{ github.ref_name }}
-          IS_TAG: ${{ steps.resolve.outputs.is_tag }}
-          FULL_TAG: ${{ steps.resolve.outputs.ref }}
-          BRANCH_EXPLICIT: ${{ steps.resolve.outputs.branch_explicit }}
-          SHA: ${{ github.sha }}
+          REF_TYPE: ${{ steps.ref.outputs.ref_type }}
+          REF_NAME: ${{ steps.ref.outputs.ref_name }}
+          REF_BRANCH: ${{ steps.ref.outputs.ref_branch }}
+          REF_COMMIT: ${{ steps.ref.outputs.ref_commit }}
+          REF_TAG_BRANCH: ${{ steps.ref.outputs.ref_tag_branch }}
         run: |
           set -euo pipefail
 
-          MULTIPLE_PACKAGES="$(printf '%s' "${MULTIPLE_PACKAGES:-}" | tr '[:upper:]' '[:lower:]')"
+          # >>> .github/snippets/resolve-env.sh
+          __slug() { printf '%s' "${1:-}" | tr -d '\r' | tr '/' '-'; }
+          __trim() { printf '%s' "${1:-}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          __fail() { echo "::error::$1" >&2; exit 1; }
 
-          if [ -n "${INPUT_ENVIRONMENT:-}" ]; then
-            REAL_BRANCH="$INPUT_ENVIRONMENT"
+          MULTIPLE_PACKAGES="$(__trim "${MULTIPLE_PACKAGES:-}" | tr '[:upper:]' '[:lower:]')"
+          __input_env="$(__trim "${INPUT_ENVIRONMENT:-}")"
+
+          if [ -n "$__input_env" ]; then
+            REF_BRANCH="$(__slug "$__input_env")"
             echo "Environment overridden by the workflow_dispatch input."
-          elif [ "$EVENT" = "pull_request" ]; then
-            REAL_BRANCH="$BASE_REF"
-          elif [ "$IS_TAG" = "true" ]; then
-            if [ -n "$BRANCH_EXPLICIT" ]; then
-              if ! git ls-remote --exit-code --heads origin "$BRANCH_EXPLICIT" >/dev/null 2>&1; then
-                echo "::error::Branch '$BRANCH_EXPLICIT' from tag '$FULL_TAG' not found." >&2
-                exit 1
-              fi
-              REAL_BRANCH="$BRANCH_EXPLICIT"
-            else
-              REAL_BRANCH=$(git branch -r --contains "$SHA" | grep -v HEAD | head -1 | sed 's#.*origin/##' | tr -d '[:space:]')
+
+          elif [ -z "${REF_BRANCH:-}" ]; then
+            __found="$(git branch -r --contains "$REF_COMMIT" 2>/dev/null | grep -v HEAD | head -1 | sed 's#.*origin/##' | tr -d '[:space:]' || true)"
+            if [ -z "$__found" ]; then
+              __fail "Cannot tell which branch tag '$REF_NAME' was cut from: commit $REF_COMMIT is not on any remote branch. Checkout with fetch-depth: 0 is required."
             fi
-          else
-            REAL_BRANCH="$REF_NAME"
+            REF_BRANCH="$(__slug "$__found")"
+
+          elif [ "$REF_TYPE" = "tag" ] && [ -n "${REF_TAG_BRANCH:-}" ]; then
+            if ! git ls-remote --exit-code --heads origin "$REF_TAG_BRANCH" >/dev/null 2>&1; then
+              __fail "Branch '$REF_TAG_BRANCH' from tag '$REF_NAME' not found."
+            fi
           fi
 
-          BRANCH="${REAL_BRANCH//\//-}"
-          echo "Environment resolved to: '$BRANCH'"
-          echo "environment=$BRANCH" >> "$GITHUB_OUTPUT"
+          __suffix=""
+          if [ "$MULTIPLE_PACKAGES" = "true" ]; then __suffix="-${REF_BRANCH}"; fi
 
-          if [ "${MULTIPLE_PACKAGES:-}" = "true" ]; then
-            echo "pkg_suffix=-${BRANCH}" >> "$GITHUB_OUTPUT"
+          if [ -n "$__suffix" ]; then
+            echo "Environment resolved to: '$REF_BRANCH' (package suffix '$__suffix')"
           else
-            echo "pkg_suffix=" >> "$GITHUB_OUTPUT"
+            echo "Environment resolved to: '$REF_BRANCH'"
           fi
+
+          {
+            echo "ref_branch=$REF_BRANCH"
+            echo "environment=$REF_BRANCH"
+            echo "pkg_suffix=$__suffix"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "REF_BRANCH=$REF_BRANCH" >> "$GITHUB_ENV"
+
+          unset -f __slug __trim __fail
+          unset __input_env __found __suffix
+          # <<< .github/snippets/resolve-env.sh
 
   resolve-config:
-    needs: resolve-branch
+    needs: resolve-ref
     runs-on: ubuntu-latest
 
-    environment: ${{ needs.resolve-branch.outputs.environment }}
+    environment: ${{ needs.resolve-ref.outputs.environment }}
 
     outputs:
       run_ci: ${{ steps.decide.outputs.run_ci }}
@@ -268,7 +333,8 @@ jobs:
         shell: bash
         env:
           EVENT: ${{ github.event_name }}
-          IS_TAG: ${{ needs.resolve-branch.outputs.is_tag }}
+          REF_TYPE: ${{ needs.resolve-ref.outputs.ref_type }}
+          REF_NAME_NORM: ${{ needs.resolve-ref.outputs.ref_name_norm }}
           INPUT_COMMITS: ${{ inputs.commits }}
           PUSH_COMMITS: ${{ join(github.event.commits.*.id, ',') }}
           INPUT_RUN_CI: ${{ inputs.run_ci }}
@@ -287,28 +353,36 @@ jobs:
           PUBLISH_METHOD="$(lower "${PUBLISH_METHOD:-}")"
 
           case "$ACTION_TRIGGER" in
-            dispatch)
-              echo "::warning::ACTION_TRIGGER=dispatch is deprecated — rename the value to workflow_dispatch."
-              ACTION_TRIGGER=workflow_dispatch
-              ;;
-            workflow_dispatch|push|release) ;;
+            workflow_dispatch|push|branch|tag) ;;
             *)
-              echo "::error::Invalid ACTION_TRIGGER='$ACTION_TRIGGER'. Allowed: workflow_dispatch | push | release." >&2
+              echo "::error::Invalid ACTION_TRIGGER='$ACTION_TRIGGER'. Allowed: workflow_dispatch | push | branch | tag." >&2
               exit 1
               ;;
           esac
 
           PR=false
           ACTIVE=false
-          case "$EVENT" in
-            workflow_dispatch) ACTIVE=true ;;
-            pull_request)      PR=true ;;
-            push)
-              if [ "$IS_TAG" = "true" ]; then
-                case "$ACTION_TRIGGER" in push|release) ACTIVE=true ;; esac
-              else
-                if [ "$ACTION_TRIGGER" = "push" ]; then ACTIVE=true; fi
+          case "$REF_TYPE" in
+            pr)
+              PR=true
+              ;;
+            tag)
+              if [ "$EVENT" = "workflow_dispatch" ]; then
+                ACTIVE=true
+              elif [ "$EVENT" = "push" ]; then
+                case "$ACTION_TRIGGER" in push|tag) ACTIVE=true ;; esac
               fi
+              ;;
+            branch)
+              if [ "$EVENT" = "workflow_dispatch" ]; then
+                ACTIVE=true
+              elif [ "$EVENT" = "push" ]; then
+                case "$ACTION_TRIGGER" in push|branch) ACTIVE=true ;; esac
+              fi
+              ;;
+            *)
+              echo "::error::resolve-ref returned REF_TYPE='$REF_TYPE' — expected tag | branch | pr." >&2
+              exit 1
               ;;
           esac
 
@@ -324,7 +398,7 @@ jobs:
           RUN_RELEASE=false
           RUN_CD=false
           if { [ "$PR" = "true" ] || [ "$ACTIVE" = "true" ]; } && [ "$HAVE_CI" = "true" ]; then RUN_CI=true; fi
-          if [ "$ACTIVE" = "true" ] && [ "$IS_TAG" = "true" ]; then RUN_RELEASE=true; fi
+          if [ "$ACTIVE" = "true" ] && [ "$REF_TYPE" = "tag" ]; then RUN_RELEASE=true; fi
           if [ "$ACTIVE" = "true" ] && [ "$PR" != "true" ] && [ "$HAVE_CD" = "true" ]; then RUN_CD=true; fi
 
           if [ "${INPUT_RUN_CI:-}" = "false" ];      then RUN_CI=false; fi
@@ -350,7 +424,7 @@ jobs:
               else
                 SCOPE="selective"; COMMITS="$INPUT_COMMITS"
               fi
-            elif [ "$EVENT" = "push" ] && [ "$IS_TAG" = "true" ]; then
+            elif [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
               SCOPE="full"
             elif [ "$EVENT" = "push" ]; then
               if [ "$DEPLOY_LAST_COMMITS" = "true" ]; then
@@ -380,7 +454,7 @@ jobs:
             *) echo "::warning::Unknown PUBLISH_METHOD='$PUBLISH_METHOD' — nothing will be published. Allowed: npm | docker | packagist." ;;
           esac
 
-          echo "ACTION_TRIGGER=$ACTION_TRIGGER event=$EVENT is_tag=$IS_TAG active=$ACTIVE pr=$PR"
+          echo "ACTION_TRIGGER=$ACTION_TRIGGER event=$EVENT ref_type=$REF_TYPE ref_name_norm=$REF_NAME_NORM active=$ACTIVE pr=$PR"
           echo "run_ci=$RUN_CI run_release=$RUN_RELEASE run_cd=$RUN_CD"
           echo "method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR scope=$SCOPE os=$OS_JSON publish=${PUBLISH_METHOD:-<none>}"
           {
@@ -396,7 +470,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   ci:
-    needs: [resolve-branch, resolve-config]
+    needs: [resolve-ref, resolve-config]
     if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
 
     strategy:
@@ -406,19 +480,24 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
-    environment: ${{ needs.resolve-branch.outputs.environment }}
+    environment: ${{ needs.resolve-ref.outputs.environment }}
 
     permissions:
       contents: read
 
     env:
+      REF_TYPE: ${{ needs.resolve-ref.outputs.ref_type }}
+      REF_NAME: ${{ needs.resolve-ref.outputs.ref_name }}
+      REF_NAME_NORM: ${{ needs.resolve-ref.outputs.ref_name_norm }}
+      REF_BRANCH: ${{ needs.resolve-ref.outputs.ref_branch }}
+      REF_COMMIT: ${{ needs.resolve-ref.outputs.ref_commit }}
       BUILD_COMMAND: ${{ vars.BUILD_COMMAND }}
       CI_COMMAND: ${{ vars.CI_COMMAND }}
 
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve-branch.outputs.is_tag == 'true' && needs.resolve-branch.outputs.ref || '' }}
+          ref: ${{ needs.resolve-ref.outputs.ref_type == 'tag' && needs.resolve-ref.outputs.ref_name || '' }}
           submodules: recursive
 
       - name: Collect vars & secrets
@@ -436,7 +515,7 @@ jobs:
           : > "$CTX"
           chmod 600 "$CTX"
 
-          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token)$'
+          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token|REF_TYPE|REF_NAME|REF_NAME_NORM|REF_BRANCH|REF_COMMIT|TARGET_COMMIT)$'
 
           emit() {
             local json="$1" mask="$2" label="$3"
@@ -752,11 +831,11 @@ jobs:
           exit 0
 
   release-publish:
-    needs: [resolve-branch, resolve-config, ci]
+    needs: [resolve-ref, resolve-config, ci]
     if: ${{ !failure() && !cancelled() && needs.resolve-config.outputs.run_release == 'true' }}
     runs-on: ubuntu-latest
 
-    environment: ${{ needs.resolve-branch.outputs.environment }}
+    environment: ${{ needs.resolve-ref.outputs.environment }}
 
     env:
       RELEASE_FILES: ${{ vars.RELEASE_FILES }}
@@ -764,7 +843,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve-branch.outputs.ref }}
+          ref: ${{ needs.resolve-ref.outputs.ref_name }}
           submodules: recursive
 
       - name: Download workspace from ci
@@ -825,19 +904,19 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ needs.resolve-branch.outputs.ref }}
-          name: ${{ needs.resolve-branch.outputs.pkg_suffix != '' && format('{0} release {1}', needs.resolve-branch.outputs.environment, needs.resolve-branch.outputs.tag) || format('Release {0}', needs.resolve-branch.outputs.tag) }}
+          tag_name: ${{ needs.resolve-ref.outputs.ref_name }}
+          name: ${{ needs.resolve-ref.outputs.pkg_suffix != '' && format('{0} release {1}', needs.resolve-ref.outputs.environment, needs.resolve-ref.outputs.ref_tag) || format('Release {0}', needs.resolve-ref.outputs.ref_tag) }}
           generate_release_notes: true
           files: ${{ steps.stage.outputs.files }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   npm-publish:
-    needs: [resolve-branch, resolve-config, release-publish]
+    needs: [resolve-ref, resolve-config, release-publish]
     if: ${{ !failure() && !cancelled() && needs.resolve-config.outputs.run_release == 'true' && needs.resolve-config.outputs.publish_method == 'npm' }}
     runs-on: ubuntu-latest
 
-    environment: ${{ needs.resolve-branch.outputs.environment }}
+    environment: ${{ needs.resolve-ref.outputs.environment }}
 
     permissions:
       contents: read
@@ -847,7 +926,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve-branch.outputs.ref }}
+          ref: ${{ needs.resolve-ref.outputs.ref_name }}
           submodules: recursive
 
       - name: Download workspace from ci
@@ -895,7 +974,7 @@ jobs:
       - name: Set version from tag
         shell: bash
         env:
-          TAG: ${{ needs.resolve-branch.outputs.tag }}
+          TAG: ${{ needs.resolve-ref.outputs.ref_tag }}
         run: |
           set -euo pipefail
           if [[ ! "$TAG" =~ ^v([0-9]+(\.[0-9]+)*)$ ]]; then
@@ -909,10 +988,10 @@ jobs:
           npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       - name: Apply per-branch package name
-        if: ${{ needs.resolve-branch.outputs.pkg_suffix != '' }}
+        if: ${{ needs.resolve-ref.outputs.pkg_suffix != '' }}
         shell: bash
         env:
-          SUFFIX: ${{ needs.resolve-branch.outputs.pkg_suffix }}
+          SUFFIX: ${{ needs.resolve-ref.outputs.pkg_suffix }}
         run: |
           set -euo pipefail
           NAME=$(node -p "require('./package.json').name")
@@ -984,11 +1063,11 @@ jobs:
           fi
 
   docker-publish:
-    needs: [resolve-branch, resolve-config, release-publish]
+    needs: [resolve-ref, resolve-config, release-publish]
     if: ${{ !failure() && !cancelled() && needs.resolve-config.outputs.run_release == 'true' && needs.resolve-config.outputs.publish_method == 'docker' }}
     runs-on: ubuntu-latest
 
-    environment: ${{ needs.resolve-branch.outputs.environment }}
+    environment: ${{ needs.resolve-ref.outputs.environment }}
 
     env:
       DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY || 'ghcr.io' }}
@@ -999,7 +1078,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve-branch.outputs.ref }}
+          ref: ${{ needs.resolve-ref.outputs.ref_name }}
           submodules: recursive
 
       - name: Download workspace from ci
@@ -1023,9 +1102,9 @@ jobs:
         id: meta
         shell: bash
         env:
-          SUFFIX: ${{ needs.resolve-branch.outputs.pkg_suffix }}
-          BRANCH: ${{ needs.resolve-branch.outputs.environment }}
-          TAG: ${{ needs.resolve-branch.outputs.tag }}
+          SUFFIX: ${{ needs.resolve-ref.outputs.pkg_suffix }}
+          BRANCH: ${{ needs.resolve-ref.outputs.environment }}
+          TAG: ${{ needs.resolve-ref.outputs.ref_tag }}
         run: |
           set -euo pipefail
           IMG="${DOCKER_IMAGE}${SUFFIX}"
@@ -1072,15 +1151,15 @@ jobs:
             GH_TOKEN=${{ secrets.GITHUB_TOKEN }}
             PAT_TOKEN=${{ secrets.PAT_TOKEN }}
             VERSION=${{ steps.meta.outputs.sha_short }}
-            ENVIRONMENT=${{ needs.resolve-branch.outputs.environment }}
+            ENVIRONMENT=${{ needs.resolve-ref.outputs.environment }}
             ${{ vars.DOCKER_BUILD_ARGS }}
 
   packagist-publish:
-    needs: [resolve-branch, resolve-config, release-publish]
+    needs: [resolve-ref, resolve-config, release-publish]
     if: ${{ !failure() && !cancelled() && needs.resolve-config.outputs.run_release == 'true' && needs.resolve-config.outputs.publish_method == 'packagist' }}
     runs-on: ubuntu-latest
 
-    environment: ${{ needs.resolve-branch.outputs.environment }}
+    environment: ${{ needs.resolve-ref.outputs.environment }}
 
     steps:
       - name: Publish to Packagist (update; create on first publish)
@@ -1126,17 +1205,24 @@ jobs:
           fi
 
   cd:
-    needs: [resolve-branch, resolve-config, ci, release-publish, npm-publish, docker-publish, packagist-publish]
+    needs: [resolve-ref, resolve-config, ci, release-publish, npm-publish, docker-publish, packagist-publish]
     if: ${{ !failure() && !cancelled() && needs.resolve-config.outputs.run_cd == 'true' }}
     runs-on: ubuntu-latest
 
-    environment: ${{ needs.resolve-branch.outputs.environment }}
+    environment: ${{ needs.resolve-ref.outputs.environment }}
 
     permissions:
       contents: read
       packages: read
 
     env:
+      # Контракт ref-а. В блоке env: джобы — значит виден и во всех шагах, и внутри
+      # BUILD_COMMAND / CI_COMMAND, без единой правки в самих шагах запуска.
+      REF_TYPE: ${{ needs.resolve-ref.outputs.ref_type }}
+      REF_NAME: ${{ needs.resolve-ref.outputs.ref_name }}
+      REF_NAME_NORM: ${{ needs.resolve-ref.outputs.ref_name_norm }}
+      REF_BRANCH: ${{ needs.resolve-ref.outputs.ref_branch }}
+      REF_COMMIT: ${{ needs.resolve-ref.outputs.ref_commit }}
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
       DEPLOY_USER: ${{ vars.DEPLOY_USER }}
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
@@ -1189,7 +1275,7 @@ jobs:
           : > "$CTX"
           chmod 600 "$CTX"
 
-          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token)$'
+          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token|REF_TYPE|REF_NAME|REF_NAME_NORM|REF_BRANCH|REF_COMMIT|TARGET_COMMIT)$'
 
           emit() {
             local json="$1" mask="$2" label="$3"
@@ -1360,31 +1446,31 @@ jobs:
         if: ${{ env.SCOPE != 'none' }}
         uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve-branch.outputs.is_tag == 'true' && needs.resolve-branch.outputs.ref || github.ref_name }}
+          ref: ${{ needs.resolve-ref.outputs.ref_name }}
           fetch-depth: 0
           submodules: recursive
 
-      - name: Resolve REF_COMMIT
+      - name: Resolve TARGET_COMMIT
         if: ${{ env.SCOPE == 'selective' }}
         shell: bash
         run: |
           set -euo pipefail
 
           if [ -z "$COMMITS" ]; then
-            REF_COMMIT=$(git rev-parse HEAD)
-            echo "No commits specified — REF_COMMIT = HEAD = $REF_COMMIT"
+            TARGET_COMMIT=$(git rev-parse HEAD)
+            echo "No commits specified — TARGET_COMMIT = HEAD = $TARGET_COMMIT"
           else
             readarray -t COMMITS_ARR < <(echo "$COMMITS" | tr ',; \t\r\n' '\n' | tr -s '\n' | grep -v '^[[:space:]]*$')
-            REF_COMMIT=$(git log --no-walk --format='%ct %H' "${COMMITS_ARR[@]}" | sort -k1 -nr | head -1 | awk '{print $2}')
-            echo "Resolved REF_COMMIT (latest by committer-date) = $REF_COMMIT"
+            TARGET_COMMIT=$(git log --no-walk --format='%ct %H' "${COMMITS_ARR[@]}" | sort -k1 -nr | head -1 | awk '{print $2}')
+            echo "Resolved TARGET_COMMIT (latest by committer-date) = $TARGET_COMMIT"
           fi
 
-          echo "REF_COMMIT=$REF_COMMIT" >> "$GITHUB_ENV"
+          echo "TARGET_COMMIT=$TARGET_COMMIT" >> "$GITHUB_ENV"
 
           HEAD_COMMIT=$(git rev-parse HEAD)
-          if [ "$REF_COMMIT" != "$HEAD_COMMIT" ]; then
-            echo "Checking out REF_COMMIT (HEAD was $HEAD_COMMIT)"
-            git checkout --force --detach "$REF_COMMIT"
+          if [ "$TARGET_COMMIT" != "$HEAD_COMMIT" ]; then
+            echo "Checking out TARGET_COMMIT (HEAD was $HEAD_COMMIT)"
+            git checkout --force --detach "$TARGET_COMMIT"
           fi
 
       - name: Download workspace from ci
@@ -1549,7 +1635,7 @@ jobs:
               rel="$file"
             fi
 
-            if git cat-file -e "$REF_COMMIT:$file" 2>/dev/null; then
+            if git cat-file -e "$TARGET_COMMIT:$file" 2>/dev/null; then
               echo "$rel" >> "$UPLOAD_FILE"
             else
               if [ "${DEPLOY_MIRROR}" = "true" ] || [ "${DEPLOY_MIRROR}" = "full" ]; then
@@ -1947,17 +2033,11 @@ jobs:
         shell: bash
         env:
           REPO: ${{ github.repository }}
-          IS_TAG: ${{ needs.resolve-branch.outputs.is_tag }}
-          TAG_REF: ${{ needs.resolve-branch.outputs.ref }}
-          BRANCH_REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
-          if [ "$IS_TAG" = "true" ]; then
-            TARGET="$TAG_REF"; KIND=tag
-          else
-            TARGET="$BRANCH_REF"; KIND=branch
-          fi
+          KIND="$REF_TYPE"
+          TARGET="$REF_NAME"
           echo "Deploying $KIND '$TARGET' of $REPO to $DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH"
 
           S="$RUNNER_TEMP/remote_git.sh"

@@ -1,0 +1,48 @@
+# имя | событие | ref_type | ref_name | MULTIPLE_PACKAGES | доп. окружение | ожидание
+# ожидание: key=value через ; либо !error:<подстрока>
+
+ветка main                | push | branch | main          |       | | ref_type=branch;ref_name=main;ref_name_norm=main;ref_branch=main
+ветка со слешем           | push | branch | release/1.x   |       | | ref_type=branch;ref_name=release/1.x;ref_name_norm=release-1.x;ref_branch=release-1.x
+ветка с двумя слешами     | push | branch | feature/a/b   |       | | ref_type=branch;ref_name=feature/a/b;ref_name_norm=feature-a-b;ref_branch=feature-a-b
+ветка в multi-режиме      | push | branch | dev           | true  | | ref_type=branch;ref_name=dev;ref_name_norm=dev;ref_branch=dev
+
+тег v1                    | push | tag    | v1            |       | | ref_type=tag;ref_name=v1;ref_name_norm=1;ref_branch=;ref_tag=v1
+тег v1.2                  | push | tag    | v1.2          |       | | ref_type=tag;ref_name=v1.2;ref_name_norm=1.2;ref_tag=v1.2
+тег v1.2.3                | push | tag    | v1.2.3        |       | | ref_type=tag;ref_name=v1.2.3;ref_name_norm=1.2.3;ref_branch=;ref_tag=v1.2.3;ref_tag_branch=
+тег v10.0.1               | push | tag    | v10.0.1       | false | | ref_type=tag;ref_name_norm=10.0.1
+
+тег main/v1.2.3           | push | tag    | main/v1.2.3          | true | | ref_type=tag;ref_name=main/v1.2.3;ref_name_norm=main-1.2.3;ref_branch=main;ref_tag=v1.2.3;ref_tag_branch=main
+тег release/1.x/v1.2.3    | push | tag    | release/1.x/v1.2.3   | true | | ref_type=tag;ref_name_norm=release-1.x-1.2.3;ref_branch=release-1.x;ref_tag=v1.2.3;ref_tag_branch=release/1.x
+тег dev/v2                | push | tag    | dev/v2               | true | | ref_name_norm=dev-2;ref_tag=v2
+
+MP в верхнем регистре     | push | tag    | main/v1.2.3   | TRUE  | | ref_name_norm=main-1.2.3
+MP с пробелами и CR       | push | tag    | main/v1.2.3   |       | MULTIPLE_PACKAGES=$' True\r' | ref_name_norm=main-1.2.3
+MP=yes не считается да    | push | tag    | v1.2.3        | yes   | | ref_name_norm=1.2.3
+
+плоский тег в multi       | push | tag    | v1.2.3        | true  | | !error:must have the form
+тег с веткой в single     | push | tag    | main/v1.2.3   | false | | !error:without a branch prefix
+тег с веткой без MP       | push | tag    | main/v1.2.3   |       | | !error:without a branch prefix
+
+тег без v                 | push | tag    | 1.2.3         |       | | !error:not a v-version
+тег с буквами             | push | tag    | vX.Y          |       | | !error:not a v-version
+тег из одной v            | push | tag    | v             |       | | !error:not a v-version
+тег-предрелиз             | push | tag    | v1.2.3-rc1    |       | | !error:not a v-version
+тег latest                | push | tag    | latest        |       | | !error:not a v-version
+
+PR в main                 | pull_request | branch | 42/merge | | PR_NUMBER=42 PR_BASE_REF=main PR_HEAD_SHA=abc123 | ref_type=pr;ref_name=42/merge;ref_name_norm=pr-42;ref_branch=main;ref_commit=abc123
+PR в ветку со слешем      | pull_request | branch | 7/merge  | | PR_NUMBER=7 PR_BASE_REF=release/1.x PR_HEAD_SHA=def456 | ref_type=pr;ref_name_norm=pr-7;ref_branch=release-1.x
+PR без PR_NUMBER          | pull_request | branch | 99/merge | | PR_BASE_REF=main | ref_type=pr;ref_name_norm=pr-99
+PR не проверяет формат тега | pull_request | branch | 5/merge | true | PR_NUMBER=5 PR_BASE_REF=main | ref_type=pr;ref_name_norm=pr-5
+
+dispatch на ветке         | workflow_dispatch | branch | main        |      | | ref_type=branch;ref_name_norm=main
+dispatch на теге          | workflow_dispatch | tag    | v3.1.0      |      | | ref_type=tag;ref_name_norm=3.1.0
+dispatch на теге в multi  | workflow_dispatch | tag    | main/v3.1.0 | true | | ref_type=tag;ref_name_norm=main-3.1.0
+
+коммит всегда есть        | push | branch | main |  | | ref_commit=1111111111111111111111111111111111111111
+пустой ref_name           | push | branch |      |  | | !error:GITHUB_REF_NAME is empty
+пустой sha                | push | branch | main |  | GITHUB_SHA= | !error:GITHUB_SHA is empty
+
+тег latest не послабляется   | push | tag | latest      |      | TAG_VERSION_REQUIRED=false | !error:not a v-version
+тег qa/smoke не послабляется | push | tag | qa/smoke    |      | TAG_VERSION_REQUIRED=false | !error:not a v-version
+дата в теге не послабляется  | push | tag | release-2026-09-13 | | TAG_VERSION_REQUIRED=false | !error:not a v-version
+префикс без multi не послабляется | push | tag | main/v1.2.3 | | TAG_VERSION_REQUIRED=false | !error:without a branch prefix

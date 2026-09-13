@@ -77,6 +77,46 @@ jobs:
 релизы по тегам, публикация в реестры, деплой. Незаданная переменная просто выключает свой шаг,
 а джоба становится серой, а не красной.
 
+## Переменные ref
+
+Все четыре workflow одинаково отвечают на вопрос «что запущено». Джоба (или шаг) `resolve-ref`
+первым делом выставляет `REF_TYPE`, `REF_NAME`, `REF_NAME_NORM`, `REF_BRANCH` и `REF_COMMIT` —
+и дальше весь toolkit работает только с ними, не трогая `github.ref_name` и `github.sha`.
+В `ci-cd` они доступны и внутри `BUILD_COMMAND` / `CI_COMMAND`:
+
+```
+BUILD_COMMAND=docker build -t myapp:$REF_NAME_NORM .
+```
+
+Таблица значений и разбор частных случаев —
+в [документации ci-cd](.github/workflows/ci-cd.yml.md#переменные-ref-что-именно-запущено).
+
+Разбор живёт в `.github/snippets/resolve-ref.sh` и `resolve-env.sh` — по одному файлу на всё,
+а в YAML лежат его копии между маркерами `# >>> ` и `# <<< `. После правки сниппета копии
+перевстраиваются `tests/sync.sh --write`; расхождение ловит тест.
+
+## Тесты
+
+```bash
+tests/run.sh                # в Docker: shell-тесты, actionlint, shellcheck
+tests/run.sh --local        # без контейнера — так же идёт в CI
+tests/run.sh --local resolve   # только наборы, чьё имя содержит «resolve»
+tests/sync.sh --check       # копии сниппетов в workflow не разъехались
+tests/sync.sh --write       # перевстроить копии после правки сниппета
+```
+
+| Набор | Что закрывает |
+|---|---|
+| `resolve-ref` | таблица разбора ref: ветки, теги, PR, регламент тегов, `MULTIPLE_PACKAGES` |
+| `resolve-env` | ветка запуска и имя Environment, включая ветку плоского тега по истории |
+| `action-trigger` | что запускается при каком `ACTION_TRIGGER` и событии |
+| `sync` | встроенные в YAML копии сниппетов совпадают с исходником |
+| `no-stale-refs` | нигде не остался прямой `github.ref_name` / `github.sha` и старые выходы |
+
+Сам git_toolkit гоняет их на каждый push: `ci-cd.yml` триггерится и в собственном репозитории,
+отдельный workflow для этого не нужен — достаточно repository-level переменных
+`ACTION_TRIGGER=branch` и `CI_COMMAND=tests/run.sh`.
+
 ## Шаблоны .gitignore
 
 Готовые `.gitignore` под Bitrix, WordPress и Python — см. [`.gitignore/`](.gitignore/).
