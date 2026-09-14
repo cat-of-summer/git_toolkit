@@ -515,7 +515,7 @@ jobs:
           : > "$CTX"
           chmod 600 "$CTX"
 
-          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token|REF_TYPE|REF_NAME|REF_NAME_NORM|REF_BRANCH|REF_COMMIT|TARGET_COMMIT)$'
+          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token|REF_TYPE|REF_NAME|REF_NAME_NORM|REF_BRANCH|REF_COMMIT|TARGET_COMMIT|PUBLISHED_IMAGE|PUBLISHED_IMAGE_TAG)$'
 
           emit() {
             local json="$1" mask="$2" label="$3"
@@ -1069,6 +1069,10 @@ jobs:
 
     environment: ${{ needs.resolve-ref.outputs.environment }}
 
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      tag: ${{ steps.meta.outputs.version }}
+
     env:
       DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY || 'ghcr.io' }}
       DOCKER_IMAGE: ${{ vars.DOCKER_IMAGE || github.repository }}
@@ -1216,13 +1220,13 @@ jobs:
       packages: read
 
     env:
-      # Контракт ref-а. В блоке env: джобы — значит виден и во всех шагах, и внутри
-      # BUILD_COMMAND / CI_COMMAND, без единой правки в самих шагах запуска.
       REF_TYPE: ${{ needs.resolve-ref.outputs.ref_type }}
       REF_NAME: ${{ needs.resolve-ref.outputs.ref_name }}
       REF_NAME_NORM: ${{ needs.resolve-ref.outputs.ref_name_norm }}
       REF_BRANCH: ${{ needs.resolve-ref.outputs.ref_branch }}
       REF_COMMIT: ${{ needs.resolve-ref.outputs.ref_commit }}
+      PUBLISHED_IMAGE_TAG: ${{ needs.docker-publish.outputs.tag }}
+      PUBLISHED_IMAGE: ${{ needs.docker-publish.outputs.image != '' && format('{0}:{1}', needs.docker-publish.outputs.image, needs.docker-publish.outputs.tag) || '' }}
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
       DEPLOY_USER: ${{ vars.DEPLOY_USER }}
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
@@ -1275,7 +1279,7 @@ jobs:
           : > "$CTX"
           chmod 600 "$CTX"
 
-          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token|REF_TYPE|REF_NAME|REF_NAME_NORM|REF_BRANCH|REF_COMMIT|TARGET_COMMIT)$'
+          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token|REF_TYPE|REF_NAME|REF_NAME_NORM|REF_BRANCH|REF_COMMIT|TARGET_COMMIT|PUBLISHED_IMAGE|PUBLISHED_IMAGE_TAG)$'
 
           emit() {
             local json="$1" mask="$2" label="$3"
@@ -1687,6 +1691,9 @@ jobs:
             if [ -n "${CTX_ENV:-}" ] && [ -f "$CTX_ENV" ]; then cat "$CTX_ENV"; fi
             printf 'export GH_TOKEN=%q\n'  "$GH_TOKEN"
             printf 'export PAT_TOKEN=%q\n' "${PAT_TOKEN:-}"
+            printf 'export REF_TYPE=%q REF_NAME=%q REF_NAME_NORM=%q REF_BRANCH=%q REF_COMMIT=%q\n' \
+              "$REF_TYPE" "$REF_NAME" "$REF_NAME_NORM" "$REF_BRANCH" "$REF_COMMIT"
+            printf 'export PUBLISHED_IMAGE=%q PUBLISHED_IMAGE_TAG=%q\n' "${PUBLISHED_IMAGE:-}" "${PUBLISHED_IMAGE_TAG:-}"
             if [ -f "$RUNNER_TEMP/remote_prelude.sh" ]; then cat "$RUNNER_TEMP/remote_prelude.sh"; fi
             printf 'cd %q\n' "$DEPLOY_PATH"
             printf '%s\n' "${BEFORE_DEPLOY_COMMAND//$'\r'/}"
@@ -2125,6 +2132,9 @@ jobs:
             if [ -n "${CTX_ENV:-}" ] && [ -f "$CTX_ENV" ]; then cat "$CTX_ENV"; fi
             printf 'export GH_TOKEN=%q\n'  "$GH_TOKEN"
             printf 'export PAT_TOKEN=%q\n' "${PAT_TOKEN:-}"
+            printf 'export REF_TYPE=%q REF_NAME=%q REF_NAME_NORM=%q REF_BRANCH=%q REF_COMMIT=%q\n' \
+              "$REF_TYPE" "$REF_NAME" "$REF_NAME_NORM" "$REF_BRANCH" "$REF_COMMIT"
+            printf 'export PUBLISHED_IMAGE=%q PUBLISHED_IMAGE_TAG=%q\n' "${PUBLISHED_IMAGE:-}" "${PUBLISHED_IMAGE_TAG:-}"
             if [ -f "$RUNNER_TEMP/remote_prelude.sh" ]; then cat "$RUNNER_TEMP/remote_prelude.sh"; fi
             printf 'cd %q\n' "$DEPLOY_PATH"
             printf '%s\n' "${AFTER_DEPLOY_COMMAND//$'\r'/}"
