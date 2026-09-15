@@ -1465,6 +1465,21 @@ jobs:
             echo "No commits specified — TARGET_COMMIT = HEAD = $TARGET_COMMIT"
           else
             readarray -t COMMITS_ARR < <(echo "$COMMITS" | tr ',; \t\r\n' '\n' | tr -s '\n' | grep -v '^[[:space:]]*$')
+
+            MISSING=()
+            for commit in "${COMMITS_ARR[@]}"; do
+              if git cat-file -e "${commit}^{commit}" 2>/dev/null; then continue; fi
+              echo "Commit $commit is not reachable from any branch or tag — fetching by SHA"
+              if git fetch --quiet origin "$commit" 2>/dev/null && git cat-file -e "${commit}^{commit}" 2>/dev/null; then
+                continue
+              fi
+              MISSING+=("$commit")
+            done
+            if [ "${#MISSING[@]}" -gt 0 ]; then
+              echo "::error::Commit(s) not found in $GITHUB_REPOSITORY: ${MISSING[*]}. Possible reasons: a typo; the commit was rewritten (rebase/amend/force-push) and the hash is stale; its branch was deleted; it belongs to a fork or another repository. Use a hash from 'git log' of the current branch." >&2
+              exit 1
+            fi
+
             TARGET_COMMIT=$(git log --no-walk --format='%ct %H' "${COMMITS_ARR[@]}" | sort -k1 -nr | head -1 | awk '{print $2}')
             echo "Resolved TARGET_COMMIT (latest by committer-date) = $TARGET_COMMIT"
           fi
