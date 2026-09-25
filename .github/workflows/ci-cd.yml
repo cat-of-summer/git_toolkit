@@ -451,7 +451,8 @@ jobs:
 
           case "${PUBLISH_METHOD:-}" in
             ''|npm|docker|packagist) ;;
-            *) echo "::warning::Unknown PUBLISH_METHOD='$PUBLISH_METHOD' — nothing will be published. Allowed: npm | docker | packagist." ;;
+            *) echo "::error::Unknown PUBLISH_METHOD='$PUBLISH_METHOD'. Allowed: npm | docker | packagist (empty = do not publish)." >&2
+               exit 1 ;;
           esac
 
           echo "ACTION_TRIGGER=$ACTION_TRIGGER event=$EVENT ref_type=$REF_TYPE ref_name_norm=$REF_NAME_NORM active=$ACTIVE pr=$PR"
@@ -1045,10 +1046,11 @@ jobs:
 
       - name: Publish to npmjs.org
         id: npmjs
-        continue-on-error: true
         shell: bash
         env:
           REPO_PRIVATE: ${{ github.event.repository.private }}
+          NODE_AUTH_TOKEN: ''
+          ENVIRONMENT: ${{ needs.resolve-ref.outputs.environment }}
         run: |
           set -euo pipefail
           if [ "$REPO_PRIVATE" = "true" ]; then ACCESS="restricted"; else ACCESS="public"; fi
@@ -1059,7 +1061,13 @@ jobs:
             echo "$PKG@$VERSION already exists in npmjs.org — skipping"
           else
             echo "npm publish --registry $URL --access $ACCESS (trusted publishing / OIDC)"
-            npm publish --registry "$URL" --access "$ACCESS"
+            if ! npm publish --registry "$URL" --access "$ACCESS"; then
+              echo "::group::npm debug log"
+              cat "$(ls -t ~/.npm/_logs/*-debug-*.log 2>/dev/null | head -1)" 2>/dev/null || echo "(debug log not found)"
+              echo "::endgroup::"
+              echo "::error::npmjs.org rejected $PKG@$VERSION. Check the package's Trusted Publisher on npmjs.com: repository '$GITHUB_REPOSITORY', workflow filename = the calling workflow in that repository (e.g. ci-cd.yml), environment empty or '${ENVIRONMENT}'. The package must already exist on npmjs (first publish is manual)." >&2
+              exit 1
+            fi
           fi
 
   docker-publish:

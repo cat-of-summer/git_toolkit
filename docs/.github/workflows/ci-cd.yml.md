@@ -199,7 +199,7 @@ Actions → **ci/cd** → **Run workflow**. В **Use workflow from** выбир�
 | Переменная | По умолчанию | Смысл |
 |---|---|---|
 | `RELEASE_FILES` | пусто | Файлы для прикрепления к Release; glob'ы через запятую: `dist/*.zip,bin/app-*`. Пусто → Release создаётся без ассетов |
-| `PUBLISH_METHOD` | пусто | Куда публиковать после релиза: `npm` / `docker` / `packagist`. Пусто → не публиковать. Неизвестное значение → предупреждение, публикации не будет |
+| `PUBLISH_METHOD` | пусто | Куда публиковать после релиза: `npm` / `docker` / `packagist`. Пусто → не публиковать. Неизвестное значение → ошибка, пайплайн падает на `resolve-config` |
 | `MULTIPLE_PACKAGES` | `false` | **repository-level.** `true` → отдельный пакет/образ на каждую ветку, тег обязан быть вида `{branch}/vX.Y.Z` |
 
 ### Публикация Docker (при `PUBLISH_METHOD=docker`)
@@ -477,11 +477,15 @@ git tag main/v1.0.0 && git push origin main/v1.0.0
 Пакет уходит в **оба** реестра:
 
 - **GitHub Packages** — обязательный шаг, по `GITHUB_TOKEN`, настраивать нечего;
-- **npmjs.org** — по OIDC, шаг помечен `continue-on-error`: его падение не валит пайплайн.
+- **npmjs.org** — по OIDC. Шаг обязательный: отказ npmjs валит job и весь пайплайн, в логе
+  выводится debug-лог npm и подсказка, что проверить.
 
 Для npmjs токен не нужен, но один раз настрой **Trusted Publisher**: npmjs.com → Package Settings →
 Trusted Publisher → GitHub Actions → владелец, репозиторий, имя workflow-файла **`ci-cd.yml`**,
-environment оставить пустым.
+environment оставить пустым. Имя файла — это **вызывающий** workflow в репозитории проекта (тот,
+что скопирован из шаблона), а не файл из `git_toolkit`. Если пакет раньше публиковался другим
+workflow (например, `release.yml`), имя в Trusted Publisher надо поменять, иначе npmjs ответит
+`404`.
 
 Требования и нюансы:
 
@@ -802,7 +806,10 @@ PUBLISH_METHOD=npm
   раннеров это уже так, self-hosted надо обновить.
 - **npm `401` (GitHub Packages).** Имя пакета должно быть scoped и совпадать с владельцем; в
   репозитории не должно быть закоммиченного `.npmrc`.
-- **npm OIDC падает.** Не настроен Trusted Publisher, либо в нём осталось старое имя файла, либо
-  пакета ещё нет на npmjs. Пайплайн при этом не падает — шаг помечен `continue-on-error`.
+- **npm `E404 … PUT https://registry.npmjs.org/@scope%2fname`.** OIDC-обмен не прошёл, и npmjs
+  не признал публикацию. Причины: Trusted Publisher не настроен; в нём указан другой
+  workflow-файл (например, старый `release.yml`), репозиторий или environment; пакета ещё нет на
+  npmjs (первую версию публикуют вручную токеном). Исправить настройку на npmjs.com и
+  переопубликовать тег — см. «Переопубликовать тег» выше.
 - **Packagist: `create failed`.** Для первой публикации нужен MAIN API-токен, а не update-токен.
 - **«уже есть — пропускаем».** Не ошибка: версия уже опубликована. Нужен новый тег.
