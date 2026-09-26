@@ -810,16 +810,29 @@ jobs:
 
           eval "${CI_COMMAND//$'\r'/}"
 
-      - name: Upload workspace
+      # upload-artifact drops file modes: without tar, executables in node_modules/.bin,
+      # esbuild/swc binaries and build scripts arrive downstream without +x (EACCES).
+      - name: Pack workspace
+        id: pack
         if: ${{ needs.resolve-config.outputs.run_release == 'true' || (needs.resolve-config.outputs.run_cd == 'true' && needs.resolve-config.outputs.scope == 'full') }}
+        shell: bash
+        env:
+          MATRIX_OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP"
+          if command -v cygpath >/dev/null 2>&1; then dir="$(cygpath -u "$dir")"; fi
+          out="$dir/workspace-$MATRIX_OS.tar"
+          tar -cf "$out" --exclude=./.git .
+          ls -l "$out"
+          echo "path=$RUNNER_TEMP/workspace-$MATRIX_OS.tar" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workspace
+        if: ${{ steps.pack.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: workspace-${{ matrix.os }}
-          path: |
-            .
-            !.git
-            !.git/**
-          include-hidden-files: true
+          path: ${{ steps.pack.outputs.path }}
           if-no-files-found: error
           retention-days: 1
 
@@ -848,12 +861,30 @@ jobs:
           submodules: recursive
 
       - name: Download workspace from ci
+        id: workspace
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
         uses: actions/download-artifact@v8
         with:
           pattern: workspace-*
           merge-multiple: true
-          path: .
+          path: ${{ runner.temp }}/workspace
+
+      - name: Unpack workspace from ci
+        if: ${{ steps.workspace.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tars=( "$RUNNER_TEMP"/workspace/workspace-*.tar )
+          if [ ${#tars[@]} -eq 0 ]; then
+            echo "::error::Artifact workspace-* contains no workspace-*.tar." >&2
+            exit 1
+          fi
+          for t in "${tars[@]}"; do
+            echo "Unpacking $(basename "$t")"
+            tar -xf "$t" -C .
+          done
+          rm -rf "$RUNNER_TEMP/workspace"
 
       - name: Flatten release asset names
         id: stage
@@ -931,12 +962,30 @@ jobs:
           submodules: recursive
 
       - name: Download workspace from ci
+        id: workspace
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
         uses: actions/download-artifact@v8
         with:
           pattern: workspace-*
           merge-multiple: true
-          path: .
+          path: ${{ runner.temp }}/workspace
+
+      - name: Unpack workspace from ci
+        if: ${{ steps.workspace.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tars=( "$RUNNER_TEMP"/workspace/workspace-*.tar )
+          if [ ${#tars[@]} -eq 0 ]; then
+            echo "::error::Artifact workspace-* contains no workspace-*.tar." >&2
+            exit 1
+          fi
+          for t in "${tars[@]}"; do
+            echo "Unpacking $(basename "$t")"
+            tar -xf "$t" -C .
+          done
+          rm -rf "$RUNNER_TEMP/workspace"
 
       - name: Resolve node version
         id: tc
@@ -1094,12 +1143,30 @@ jobs:
           submodules: recursive
 
       - name: Download workspace from ci
+        id: workspace
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
         uses: actions/download-artifact@v8
         with:
           pattern: workspace-*
           merge-multiple: true
-          path: .
+          path: ${{ runner.temp }}/workspace
+
+      - name: Unpack workspace from ci
+        if: ${{ steps.workspace.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tars=( "$RUNNER_TEMP"/workspace/workspace-*.tar )
+          if [ ${#tars[@]} -eq 0 ]; then
+            echo "::error::Artifact workspace-* contains no workspace-*.tar." >&2
+            exit 1
+          fi
+          for t in "${tars[@]}"; do
+            echo "Unpacking $(basename "$t")"
+            tar -xf "$t" -C .
+          done
+          rm -rf "$RUNNER_TEMP/workspace"
 
       - name: Validate Dockerfile
         shell: bash
@@ -1501,12 +1568,30 @@ jobs:
           fi
 
       - name: Download workspace from ci
+        id: workspace
         if: ${{ env.SCOPE == 'full' && env.RUN_CI == 'true' }}
         uses: actions/download-artifact@v8
         with:
           pattern: workspace-*
           merge-multiple: true
-          path: .
+          path: ${{ runner.temp }}/workspace
+
+      - name: Unpack workspace from ci
+        if: ${{ steps.workspace.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tars=( "$RUNNER_TEMP"/workspace/workspace-*.tar )
+          if [ ${#tars[@]} -eq 0 ]; then
+            echo "::error::Artifact workspace-* contains no workspace-*.tar." >&2
+            exit 1
+          fi
+          for t in "${tars[@]}"; do
+            echo "Unpacking $(basename "$t")"
+            tar -xf "$t" -C .
+          done
+          rm -rf "$RUNNER_TEMP/workspace"
 
       - name: Resolve toolchain
         id: tc
