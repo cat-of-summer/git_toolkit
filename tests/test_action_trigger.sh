@@ -65,4 +65,23 @@ while IFS='|' read -r name trigger event ref_type expect; do
   check_eq "$name" "${want_ci},${want_rel},${want_cd}" "$got"
 done < "$HERE/cases/action-trigger.tsv"
 
+# warm_cache: ci прогревает кеш на ветке по умолчанию, когда сам там не запускается.
+while IFS='|' read -r name trigger ref_type ref_name build expect; do
+  out="$tmp/out"; : > "$out"
+  log="$(env -i PATH="$PATH" HOME="${HOME:-/tmp}" \
+    GITHUB_OUTPUT="$out" \
+    ACTION_TRIGGER="$trigger" EVENT=push REF_TYPE="$ref_type" REF_NAME="$ref_name" REF_NAME_NORM=x \
+    DEFAULT_BRANCH=main BUILD_COMMAND="$build" CI_COMMAND= \
+    DEPLOY_METHOD=command DEPLOY_MIRROR=false DEPLOY_LAST_COMMITS=false \
+    INPUT_COMMITS= PUSH_COMMITS= RUNS_ON= PUBLISH_METHOD= \
+    bash "$SCRIPT" 2>&1)" || { fail "$name" "шаг упал" "$log"; continue; }
+  check_eq "$name" "$expect" "$(grep -m1 '^warm_cache=' "$out" | cut -d= -f2)"
+done <<'CASES'
+warm: tag-триггер, push в main|tag|branch|main|make|true
+warm: push в не-main ветку|tag|branch|feature|make|false
+warm: ci и так идёт на main|push|branch|main|make|false
+warm: нет команд сборки и тестов|tag|branch|main||false
+warm: тег|tag|tag|v1.0.0|make|false
+CASES
+
 suite_result "action-trigger"

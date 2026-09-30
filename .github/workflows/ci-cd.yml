@@ -241,6 +241,7 @@ jobs:
 
     outputs:
       run_ci: ${{ steps.decide.outputs.run_ci }}
+      warm_cache: ${{ steps.decide.outputs.warm_cache }}
       run_release: ${{ steps.decide.outputs.run_release }}
       run_cd: ${{ steps.decide.outputs.run_cd }}
       scope: ${{ steps.decide.outputs.scope }}
@@ -270,6 +271,8 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF_TYPE: ${{ needs.resolve-ref.outputs.ref_type }}
           REF_NAME_NORM: ${{ needs.resolve-ref.outputs.ref_name_norm }}
+          REF_NAME: ${{ needs.resolve-ref.outputs.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           INPUT_COMMITS: ${{ inputs.commits }}
           PUSH_COMMITS: ${{ join(github.event.commits.*.id, ',') }}
           RUNS_ON: ${{ vars.RUNS_ON }}
@@ -330,6 +333,16 @@ jobs:
           if { [ "$PR" = "true" ] || [ "$ACTIVE" = "true" ]; } && [ "$HAVE_CI" = "true" ]; then RUN_CI=true; fi
           if [ "$ACTIVE" = "true" ] && [ "$REF_TYPE" = "tag" ]; then RUN_RELEASE=true; fi
           if [ "$ACTIVE" = "true" ] && [ "$PR" != "true" ] && [ "$HAVE_CD" = "true" ]; then RUN_CD=true; fi
+
+          # A cache is visible to the ref that saved it and, from the default branch, to
+          # every ref: a tag cannot reuse what the previous tag saved. When ci does not
+          # run on the default branch, it runs there in warm-up mode instead — installs
+          # the toolchain and runs BUILD_COMMAND only to fill missing caches.
+          WARM_CACHE=false
+          if [ "$RUN_CI" != "true" ] && [ "$HAVE_CI" = "true" ] && [ "$REF_TYPE" = "branch" ] \
+            && [ -n "${DEFAULT_BRANCH:-}" ] && [ "${REF_NAME:-}" = "$DEFAULT_BRANCH" ]; then
+            WARM_CACHE=true
+          fi
 
           SCOPE=""
           COMMITS=""
@@ -404,10 +417,11 @@ jobs:
           esac
 
           echo "ACTION_TRIGGER=$ACTION_TRIGGER event=$EVENT ref_type=$REF_TYPE ref_name_norm=$REF_NAME_NORM active=$ACTIVE pr=$PR"
-          echo "run_ci=$RUN_CI run_release=$RUN_RELEASE run_cd=$RUN_CD"
+          echo "run_ci=$RUN_CI run_release=$RUN_RELEASE run_cd=$RUN_CD warm_cache=$WARM_CACHE"
           echo "method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR scope=$SCOPE commits='$COMMITS' os=$OS_JSON publish=${PUBLISH_METHOD:-<none>} apt=${APT_PACKAGES:-<none>}"
           {
             echo "run_ci=$RUN_CI"
+            echo "warm_cache=$WARM_CACHE"
             echo "run_release=$RUN_RELEASE"
             echo "run_cd=$RUN_CD"
             echo "scope=$SCOPE"
@@ -421,7 +435,7 @@ jobs:
 
   ci:
     needs: [resolve-ref, resolve-config]
-    if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
+    if: ${{ needs.resolve-config.outputs.run_ci == 'true' || needs.resolve-config.outputs.warm_cache == 'true' }}
 
     strategy:
       fail-fast: false
@@ -443,6 +457,7 @@ jobs:
       REF_COMMIT: ${{ needs.resolve-ref.outputs.ref_commit }}
       BUILD_COMMAND: ${{ vars.BUILD_COMMAND }}
       CI_COMMAND: ${{ vars.CI_COMMAND }}
+      WARM_CACHE: ${{ needs.resolve-config.outputs.warm_cache }}
 
     steps:
       - name: Checkout
@@ -459,13 +474,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          # >>> .github/snippets/collect-ctx.sh
+          # Writes vars and secrets of the job into a sourceable file and exports CTX_ENV with
+          # its path, so user commands see them as ordinary environment variables.
+          # Inputs: VARS_JSON, EXTRA_SECRETS (SECRETS_JSON, masked), ALL_SECRETS.
           tmp="$RUNNER_TEMP"
           if command -v cygpath >/dev/null 2>&1; then tmp="$(cygpath -u "$RUNNER_TEMP")"; fi
           CTX="$tmp/ctx_env.sh"
           : > "$CTX"
           chmod 600 "$CTX"
 
-          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token|REF_TYPE|REF_NAME|REF_NAME_NORM|REF_BRANCH|REF_COMMIT|TARGET_COMMIT|PUBLISHED_IMAGE|PUBLISHED_IMAGE_TAG)$'
+          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token|REF_TYPE|REF_NAME|REF_NAME_NORM|REF_BRANCH|REF_COMMIT|TARGET_COMMIT|PUBLISHED_IMAGE|PUBLISHED_IMAGE_TAG|WARM_CACHE)$'
 
           emit() {
             local json="$1" mask="$2" label="$3"
@@ -505,144 +524,180 @@ jobs:
 
           echo "CTX_ENV=$CTX" >> "$GITHUB_ENV"
 
+          unset -f emit
+          unset tmp CTX DENY
+          # <<< .github/snippets/collect-ctx.sh
+
       - name: Resolve caches
         id: resolve
         env:
           TOOLCHAIN: ${{ vars.TOOLCHAIN }}
+          MISE_FILES_HASH: ${{ hashFiles('.mise.toml', '.tool-versions') }}
           CACHE_PATHS: ${{ vars.CACHE_PATHS }}
           CACHE_KEY_FILES: ${{ vars.CACHE_KEY_FILES }}
         run: |
           set -euo pipefail
 
-          # --- Toolchain (mise) ---
-          backends="ubi,aqua,asdf,cargo,go,npm,pipx,gem,dotnet,spm,vfox,http"
-          tools=""
-          while IFS= read -r item; do
-            item="$(printf '%s' "$item" | tr -d '[:space:]')"
-            if [ -z "$item" ]; then continue; fi
-            prefix="${item%%:*}"
-            rest="${item#*:}"
-            if [ "$prefix" != "$item" ] && [[ ",$backends," == *",$prefix,"* ]] && [[ "$rest" == */* ]]; then
-              after="${rest##*/}"
-              if [[ "$after" == *@* ]]; then
-                ver="${after##*@}"; name="$prefix:${rest%@*}"
+          # >>> .github/snippets/toolchain-resolve.sh
+          # Parses TOOLCHAIN ("node:24,php@8.4,ubi:owner/repo@1.2.3") into TOOLS, mise specs
+          # "name@version" separated by spaces, and resolves MISE_DIR, where mise keeps the
+          # installs, and TOOLCHAIN_KEY, the cache key of that directory.
+          # Inputs: TOOLCHAIN, MISE_FILES_HASH (hashFiles of .mise.toml and .tool-versions).
+          __backends="ubi,aqua,asdf,cargo,go,npm,pipx,gem,dotnet,spm,vfox,http"
+          TOOLS=""
+          while IFS= read -r __item; do
+            __item="$(printf '%s' "$__item" | tr -d '[:space:]')"
+            if [ -z "$__item" ]; then continue; fi
+            __prefix="${__item%%:*}"
+            __rest="${__item#*:}"
+            if [ "$__prefix" != "$__item" ] && [[ ",$__backends," == *",$__prefix,"* ]] && [[ "$__rest" == */* ]]; then
+              __after="${__rest##*/}"
+              if [[ "$__after" == *@* ]]; then
+                __ver="${__after##*@}"; __name="$__prefix:${__rest%@*}"
               else
-                ver="latest"; name="$prefix:$rest"
+                __ver="latest"; __name="$__prefix:$__rest"
               fi
-            elif [[ "$item" == *@* ]]; then
-              name="${item%@*}"; ver="${item##*@}"
-            elif [ "$prefix" != "$item" ]; then
-              name="$prefix"; ver="$rest"
+            elif [[ "$__item" == *@* ]]; then
+              __name="${__item%@*}"; __ver="${__item##*@}"
+            elif [ "$__prefix" != "$__item" ]; then
+              __name="$__prefix"; __ver="$__rest"
             else
-              name="$item"; ver="latest"
+              __name="$__item"; __ver="latest"
             fi
-            tools="$tools $name@$ver"
+            TOOLS="$TOOLS $__name@$__ver"
           done <<< "$(printf '%s' "${TOOLCHAIN:-}" | tr ',' '\n')"
-          tools="${tools# }"
+          TOOLS="${TOOLS# }"
 
-          if [ -z "$tools" ]; then
+          if [ -z "$TOOLS" ]; then
             echo "TOOLCHAIN is not set — skipping tool installation."
           else
-            echo "Tools: $tools"
+            echo "Tools: $TOOLS"
           fi
 
           if [ -n "${MISE_DATA_DIR:-}" ]; then
-            mise_dir="$MISE_DATA_DIR"
+            MISE_DIR="$MISE_DATA_DIR"
           elif [ -n "${XDG_DATA_HOME:-}" ]; then
-            mise_dir="$XDG_DATA_HOME/mise"
+            MISE_DIR="$XDG_DATA_HOME/mise"
           elif [ "$RUNNER_OS" = "Windows" ]; then
-            mise_dir="$LOCALAPPDATA/mise"
+            MISE_DIR="$LOCALAPPDATA/mise"
           else
-            mise_dir="$HOME/.local/share/mise"
+            MISE_DIR="$HOME/.local/share/mise"
           fi
-          mise_dir="$(printf '%s' "$mise_dir" | tr '\\' '/')"
+          MISE_DIR="$(printf '%s' "$MISE_DIR" | tr '\\' '/')"
 
-          {
-            echo "tools=$tools"
-            echo "mise_dir=$mise_dir"
-          } >> "$GITHUB_OUTPUT"
+          # The key is shared by every job that installs the toolchain; keep its format stable,
+          # or caches already saved on the default branch stop matching.
+          TOOLCHAIN_KEY="mise-${RUNNER_OS}-${RUNNER_ARCH}-${MISE_FILES_HASH:-}-${TOOLS}"
 
-          # --- Dependency cache ---
-          if [ -z "${CACHE_PATHS:-}" ]; then
-            echo "CACHE_PATHS is not set — skipping the dependency cache."
-            exit 0
-          fi
+          unset __backends __item __prefix __rest __after __ver __name
+          # <<< .github/snippets/toolchain-resolve.sh
 
-          split() {
+          # >>> .github/snippets/dep-cache-resolve.sh
+          # Resolves the dependency cache from CACHE_PATHS and CACHE_KEY_FILES into DEP_PATHS
+          # (one path per line), DEP_KEY and DEP_KEY_PREFIX. Empty CACHE_PATHS leaves all three
+          # empty, which switches the cache steps off.
+          # Inputs: CACHE_PATHS, CACHE_KEY_FILES.
+          DEP_PATHS=""
+          DEP_KEY=""
+          DEP_KEY_PREFIX=""
+
+          __split() {
             printf '%s' "${1:-}" \
               | tr ',' '\n' \
               | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
               | grep -v '^$' || true
           }
 
-          PATHS="$(split "$CACHE_PATHS")"
-          if [ -z "$PATHS" ]; then
-            echo "::error::CACHE_PATHS='$CACHE_PATHS' does not contain a single path." >&2
-            exit 1
-          fi
-
-          PATTERNS="$(split "${CACHE_KEY_FILES:-}")"
-          if [ -z "$PATTERNS" ]; then
-            echo "::error::CACHE_PATHS is set, but CACHE_KEY_FILES is empty. Without key files the cache would be saved once and never refreshed — list the lock files the dependencies come from, e.g. 'package-lock.json'." >&2
-            exit 1
-          fi
-
-          shopt -s globstar nullglob dotglob
-
-          files=()
-          while IFS= read -r pattern; do
-            [ -z "$pattern" ] && continue
-            eval "matches=( $pattern )"
-            for f in "${matches[@]}"; do
-              [ -f "$f" ] && files+=("$f")
-            done
-          done <<< "$PATTERNS"
-
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::No files matched CACHE_KEY_FILES: $CACHE_KEY_FILES" >&2
-            exit 1
-          fi
-
-          sha() {
+          __sha() {
             if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi
           }
 
-          HASH=$(
-            printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | while IFS= read -r f; do
-              printf '%s  %s\n' "$(sha < "$f" | cut -d' ' -f1)" "$f"
-            done | sha | cut -c1-64
-          )
+          if [ -z "${CACHE_PATHS:-}" ]; then
+            echo "CACHE_PATHS is not set — skipping the dependency cache."
+          else
+            DEP_PATHS="$(__split "$CACHE_PATHS")"
+            if [ -z "$DEP_PATHS" ]; then
+              echo "::error::CACHE_PATHS='$CACHE_PATHS' does not contain a single path." >&2
+              exit 1
+            fi
 
-          echo "Cache paths:"
-          printf '%s\n' "$PATHS" | sed 's/^/  /'
-          echo "Key files:"
-          printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | sed 's/^/  /'
-          echo "Key hash: $HASH"
+            __patterns="$(__split "${CACHE_KEY_FILES:-}")"
+            if [ -z "$__patterns" ]; then
+              echo "::error::CACHE_PATHS is set, but CACHE_KEY_FILES is empty. Without key files the cache would be saved once and never refreshed — list the lock files the dependencies come from, e.g. 'package-lock.json'." >&2
+              exit 1
+            fi
+
+            shopt -s globstar nullglob dotglob
+
+            __files=()
+            while IFS= read -r __pattern; do
+              [ -z "$__pattern" ] && continue
+              eval "__matches=( $__pattern )"
+              for __f in "${__matches[@]}"; do
+                [ -f "$__f" ] && __files+=("$__f")
+              done
+            done <<< "$__patterns"
+
+            shopt -u globstar nullglob dotglob
+
+            if [ ${#__files[@]} -eq 0 ]; then
+              echo "::error::No files matched CACHE_KEY_FILES: $CACHE_KEY_FILES" >&2
+              exit 1
+            fi
+
+            __hash=$(
+              printf '%s\n' "${__files[@]}" | LC_ALL=C sort -u | while IFS= read -r __f; do
+                printf '%s  %s\n' "$(__sha < "$__f" | cut -d' ' -f1)" "$__f"
+              done | __sha | cut -c1-64
+            )
+
+            DEP_KEY_PREFIX="deps-${RUNNER_OS}-${RUNNER_ARCH}-"
+            DEP_KEY="${DEP_KEY_PREFIX}${__hash}"
+
+            echo "Cache paths:"
+            printf '%s\n' "$DEP_PATHS" | sed 's/^/  /'
+            echo "Key files:"
+            printf '%s\n' "${__files[@]}" | LC_ALL=C sort -u | sed 's/^/  /'
+            echo "Key: $DEP_KEY"
+          fi
+
+          unset -f __split __sha
+          unset __patterns __pattern __files __matches __f __hash
+          # <<< .github/snippets/dep-cache-resolve.sh
 
           {
+            echo "tools=$TOOLS"
+            echo "mise_dir=$MISE_DIR"
+            echo "toolchain_key=$TOOLCHAIN_KEY"
             echo "dep_paths<<EOF"
-            printf '%s\n' "$PATHS"
+            printf '%s\n' "$DEP_PATHS"
             echo "EOF"
-            echo "dep_hash=$HASH"
+            echo "dep_key=$DEP_KEY"
+            echo "dep_key_prefix=$DEP_KEY_PREFIX"
           } >> "$GITHUB_OUTPUT"
 
+      # In warm-up mode (WARM_CACHE, see resolve-config) the job only fills these caches
+      # on the default branch: the toolchain is installed on a miss, BUILD_COMMAND runs
+      # only when the dependency key missed, CI_COMMAND is skipped.
       - name: Cache toolchain
+        id: toolchain-cache
         if: ${{ steps.resolve.outputs.tools != '' }}
         uses: actions/cache@v6
         with:
           path: ${{ steps.resolve.outputs.mise_dir }}
-          key: mise-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.mise.toml', '.tool-versions') }}-${{ steps.resolve.outputs.tools }}
+          key: ${{ steps.resolve.outputs.toolchain_key }}
 
       - name: Cache dependencies
-        if: ${{ vars.CACHE_PATHS != '' }}
+        id: deps-cache
+        if: ${{ steps.resolve.outputs.dep_key != '' && (env.WARM_CACHE != 'true' || env.BUILD_COMMAND != '') }}
         uses: actions/cache@v6
         with:
           path: ${{ steps.resolve.outputs.dep_paths }}
-          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.dep_hash }}
-          restore-keys: deps-${{ runner.os }}-${{ runner.arch }}-
+          key: ${{ steps.resolve.outputs.dep_key }}
+          restore-keys: ${{ steps.resolve.outputs.dep_key_prefix }}
 
       - name: Install toolchain
-        if: ${{ steps.resolve.outputs.tools != '' }}
+        if: ${{ steps.resolve.outputs.tools != '' && (env.WARM_CACHE != 'true' || steps.toolchain-cache.outputs.cache-hit != 'true' || (steps.deps-cache.outcome == 'success' && steps.deps-cache.outputs.cache-hit != 'true')) }}
         env:
           TOOLS: ${{ steps.resolve.outputs.tools }}
           MISE_DIR: ${{ steps.resolve.outputs.mise_dir }}
@@ -650,72 +705,81 @@ jobs:
         run: |
           set -euo pipefail
 
+          # >>> .github/snippets/mise-download.sh
+          # Downloads the mise binary into MISE_BIN_DIR and sets MISE to its path. The CDN serves
+          # the latest release; when it is down, the version comes from the VERSION endpoint or
+          # the GitHub API, and as a last resort a pinned release is used.
+          # Inputs: GH_TOKEN (optional, for the GitHub API).
           case "$RUNNER_OS" in
-            Linux)   os=linux ;;
-            macOS)   os=macos ;;
-            Windows) os=windows ;;
+            Linux)   __os=linux ;;
+            macOS)   __os=macos ;;
+            Windows) __os=windows ;;
             *) echo "::error::Unsupported OS RUNNER_OS='$RUNNER_OS'." >&2; exit 1 ;;
           esac
           case "$RUNNER_ARCH" in
-            X64)   arch=x64 ;;
-            ARM64) arch=arm64 ;;
+            X64)   __arch=x64 ;;
+            ARM64) __arch=arm64 ;;
             *) echo "::error::Unsupported architecture RUNNER_ARCH='$RUNNER_ARCH'." >&2; exit 1 ;;
           esac
-          ext=""
-          if [ "$os" = "windows" ]; then ext=".exe"; fi
+          __ext=""
+          if [ "$__os" = "windows" ]; then __ext=".exe"; fi
 
-          tmp="$RUNNER_TEMP"
-          if command -v cygpath >/dev/null 2>&1; then tmp="$(cygpath -u "$RUNNER_TEMP")"; fi
-          bin_dir="$tmp/mise-bin"
-          mkdir -p "$bin_dir"
-          mise="$bin_dir/mise${ext}"
+          __tmp="$RUNNER_TEMP"
+          if command -v cygpath >/dev/null 2>&1; then __tmp="$(cygpath -u "$RUNNER_TEMP")"; fi
+          MISE_BIN_DIR="$__tmp/mise-bin"
+          mkdir -p "$MISE_BIN_DIR"
+          MISE="$MISE_BIN_DIR/mise${__ext}"
 
           MISE_FALLBACK_VERSION="v2026.7.12"
 
-          try_download() {
+          __try_download() {
             echo "  trying $1"
-            curl -fsSL --retry 3 --retry-delay 2 -o "$mise" "$1" 2>/dev/null || return 1
-            chmod +x "$mise" 2>/dev/null || true
-            "$mise" --version >/dev/null 2>&1 || return 1
+            curl -fsSL --retry 3 --retry-delay 2 -o "$MISE" "$1" 2>/dev/null || return 1
+            chmod +x "$MISE" 2>/dev/null || true
+            "$MISE" --version >/dev/null 2>&1 || return 1
             return 0
           }
 
-          release_url() {
-            printf 'https://github.com/jdx/mise/releases/download/%s/mise-%s-%s-%s%s' "$1" "$1" "$os" "$arch" "$ext"
+          __release_url() {
+            printf 'https://github.com/jdx/mise/releases/download/%s/mise-%s-%s-%s%s' "$1" "$1" "$__os" "$__arch" "$__ext"
           }
 
-          ok=false
+          __ok=false
           echo "Resolving mise version…"
-          if try_download "https://mise.jdx.dev/mise-latest-${os}-${arch}${ext}"; then
-            ok=true
+          if __try_download "https://mise.jdx.dev/mise-latest-${__os}-${__arch}${__ext}"; then
+            __ok=true
           else
             echo "::warning::The mise CDN is unavailable — trying the VERSION endpoint and the GitHub API."
-            ver=$(curl -fsSL --retry 2 https://mise.jdx.dev/VERSION 2>/dev/null | tr -d '[:space:]' || true)
-            if [ -n "$ver" ]; then
-              case "$ver" in v*) ;; *) ver="v$ver" ;; esac
-              if try_download "$(release_url "$ver")"; then ok=true; fi
+            __ver=$(curl -fsSL --retry 2 https://mise.jdx.dev/VERSION 2>/dev/null | tr -d '[:space:]' || true)
+            if [ -n "$__ver" ]; then
+              case "$__ver" in v*) ;; *) __ver="v$__ver" ;; esac
+              if __try_download "$(__release_url "$__ver")"; then __ok=true; fi
             fi
-            if [ "$ok" != "true" ]; then
-              api="https://api.github.com/repos/jdx/mise/releases/latest"
+            if [ "$__ok" != "true" ]; then
+              __api="https://api.github.com/repos/jdx/mise/releases/latest"
               if [ -n "${GH_TOKEN:-}" ]; then
-                body=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api" 2>/dev/null || true)
+                __body=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$__api" 2>/dev/null || true)
               else
-                body=$(curl -fsSL "$api" 2>/dev/null || true)
+                __body=$(curl -fsSL "$__api" 2>/dev/null || true)
               fi
-              ver=$(printf '%s' "$body" | grep -m1 '"tag_name"' | sed 's/.*"tag_name"[^"]*"\([^"]*\)".*/\1/' || true)
-              if [ -n "$ver" ] && try_download "$(release_url "$ver")"; then ok=true; fi
+              __ver=$(printf '%s' "$__body" | grep -m1 '"tag_name"' | sed 's/.*"tag_name"[^"]*"\([^"]*\)".*/\1/' || true)
+              if [ -n "$__ver" ] && __try_download "$(__release_url "$__ver")"; then __ok=true; fi
             fi
-            if [ "$ok" != "true" ]; then
+            if [ "$__ok" != "true" ]; then
               echo "::warning::Neither the CDN nor the API responded — falling back to the pinned version $MISE_FALLBACK_VERSION."
-              if try_download "$(release_url "$MISE_FALLBACK_VERSION")"; then ok=true; fi
+              if __try_download "$(__release_url "$MISE_FALLBACK_VERSION")"; then __ok=true; fi
             fi
           fi
 
-          if [ "$ok" != "true" ]; then
+          if [ "$__ok" != "true" ]; then
             echo "::error::Failed to download mise. Check the runner's access to github.com and mise.jdx.dev." >&2
             exit 1
           fi
-          echo "mise $("$mise" --version)"
+          echo "mise $("$MISE" --version)"
+
+          unset -f __try_download __release_url
+          unset __os __arch __ext __tmp __ok __ver __api __body
+          # <<< .github/snippets/mise-download.sh
 
           # >>> .github/snippets/toolchain-deps.sh
           # Some mise plugins build a tool from source and expect the system libraries
@@ -761,21 +825,27 @@ jobs:
           unset __pkgs __missing __p __t __n
           # <<< .github/snippets/toolchain-deps.sh
 
+          # >>> .github/snippets/mise-use.sh
+          # Installs TOOLS with mise and puts them on PATH for the following steps. A tool
+          # already in MISE_DIR (restored from the toolchain cache) is not installed again.
+          # Inputs: MISE, MISE_BIN_DIR, MISE_DIR, TOOLS.
           export MISE_YES=1 MISE_PYTHON_COMPILE=false
-          "$mise" use --global $TOOLS
-          "$mise" ls --installed
+          # shellcheck disable=SC2086 # TOOLS is a list of specs
+          "$MISE" use --global $TOOLS
+          "$MISE" ls --installed
 
           {
-            "$mise" bin-paths 2>/dev/null || true
-            printf '%s\n%s\n' "$MISE_DIR/shims" "$bin_dir"
-          } | while IFS= read -r p; do
-            [ -z "$p" ] && continue
-            if command -v cygpath >/dev/null 2>&1; then p="$(cygpath -w "$p")"; fi
-            printf '%s\n' "$p" >> "$GITHUB_PATH"
+            "$MISE" bin-paths 2>/dev/null || true
+            printf '%s\n%s\n' "$MISE_DIR/shims" "$MISE_BIN_DIR"
+          } | while IFS= read -r __p; do
+            [ -z "$__p" ] && continue
+            if command -v cygpath >/dev/null 2>&1; then __p="$(cygpath -w "$__p")"; fi
+            printf '%s\n' "$__p" >> "$GITHUB_PATH"
           done
+          # <<< .github/snippets/mise-use.sh
 
       - name: Build and test
-        if: ${{ env.BUILD_COMMAND != '' || env.CI_COMMAND != '' }}
+        if: ${{ (env.WARM_CACHE != 'true' && (env.BUILD_COMMAND != '' || env.CI_COMMAND != '')) || (env.WARM_CACHE == 'true' && steps.deps-cache.outcome == 'success' && steps.deps-cache.outputs.cache-hit != 'true') }}
         env:
           MATRIX_OS: ${{ matrix.os }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -791,7 +861,7 @@ jobs:
             echo "=== Build ==="
             ( eval "${BUILD_COMMAND//$'\r'/}" )
           fi
-          if [ -n "${CI_COMMAND:-}" ]; then
+          if [ -n "${CI_COMMAND:-}" ] && [ "${WARM_CACHE:-}" != "true" ]; then
             echo "=== Test ==="
             ( eval "${CI_COMMAND//$'\r'/}" )
           fi
@@ -1312,13 +1382,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          # >>> .github/snippets/collect-ctx.sh
+          # Writes vars and secrets of the job into a sourceable file and exports CTX_ENV with
+          # its path, so user commands see them as ordinary environment variables.
+          # Inputs: VARS_JSON, EXTRA_SECRETS (SECRETS_JSON, masked), ALL_SECRETS.
           tmp="$RUNNER_TEMP"
           if command -v cygpath >/dev/null 2>&1; then tmp="$(cygpath -u "$RUNNER_TEMP")"; fi
           CTX="$tmp/ctx_env.sh"
           : > "$CTX"
           chmod 600 "$CTX"
 
-          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token|REF_TYPE|REF_NAME|REF_NAME_NORM|REF_BRANCH|REF_COMMIT|TARGET_COMMIT|PUBLISHED_IMAGE|PUBLISHED_IMAGE_TAG)$'
+          DENY='^(PATH|HOME|IFS|PWD|OLDPWD|SHELL|SHELLOPTS|PS[0-9]|BASH.*|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|TMP_KEY|GT_SSH|GT_AUTH_MODE|CTX|CTX_ENV|GIT_ASKPASS|GIT_CONFIG.*|GIT_TERMINAL_PROMPT|GIT_AUTH_TOKEN.*|VARS_JSON|ALL_SECRETS|EXTRA_SECRETS|github_token|REF_TYPE|REF_NAME|REF_NAME_NORM|REF_BRANCH|REF_COMMIT|TARGET_COMMIT|PUBLISHED_IMAGE|PUBLISHED_IMAGE_TAG|WARM_CACHE)$'
 
           emit() {
             local json="$1" mask="$2" label="$3"
@@ -1357,6 +1431,10 @@ jobs:
           emit "${ALL_SECRETS:-}"   nomask "secrets"
 
           echo "CTX_ENV=$CTX" >> "$GITHUB_ENV"
+
+          unset -f emit
+          unset tmp CTX DENY
+          # <<< .github/snippets/collect-ctx.sh
 
       - name: Cache system packages
         id: cache-apt
@@ -1663,76 +1741,167 @@ jobs:
           done
           rm -rf "$RUNNER_TEMP/workspace"
 
-      - name: Install toolchain
-        if: ${{ env.SCOPE == 'selective' && env.BUILD_COMMAND != '' && vars.TOOLCHAIN != '' }}
+      - name: Resolve toolchain
+        id: toolchain
+        if: ${{ env.SCOPE == 'selective' && env.BUILD_COMMAND != '' }}
         env:
           TOOLCHAIN: ${{ vars.TOOLCHAIN }}
+          MISE_FILES_HASH: ${{ hashFiles('.mise.toml', '.tool-versions') }}
         run: |
           set -euo pipefail
 
-          backends="ubi,aqua,asdf,cargo,go,npm,pipx,gem,dotnet,spm,vfox,http"
-          tools=""
-          while IFS= read -r item; do
-            item="$(printf '%s' "$item" | tr -d '[:space:]')"
-            if [ -z "$item" ]; then continue; fi
-            prefix="${item%%:*}"
-            rest="${item#*:}"
-            if [ "$prefix" != "$item" ] && [[ ",$backends," == *",$prefix,"* ]] && [[ "$rest" == */* ]]; then
-              after="${rest##*/}"
-              if [[ "$after" == *@* ]]; then
-                ver="${after##*@}"; name="$prefix:${rest%@*}"
+          # >>> .github/snippets/toolchain-resolve.sh
+          # Parses TOOLCHAIN ("node:24,php@8.4,ubi:owner/repo@1.2.3") into TOOLS, mise specs
+          # "name@version" separated by spaces, and resolves MISE_DIR, where mise keeps the
+          # installs, and TOOLCHAIN_KEY, the cache key of that directory.
+          # Inputs: TOOLCHAIN, MISE_FILES_HASH (hashFiles of .mise.toml and .tool-versions).
+          __backends="ubi,aqua,asdf,cargo,go,npm,pipx,gem,dotnet,spm,vfox,http"
+          TOOLS=""
+          while IFS= read -r __item; do
+            __item="$(printf '%s' "$__item" | tr -d '[:space:]')"
+            if [ -z "$__item" ]; then continue; fi
+            __prefix="${__item%%:*}"
+            __rest="${__item#*:}"
+            if [ "$__prefix" != "$__item" ] && [[ ",$__backends," == *",$__prefix,"* ]] && [[ "$__rest" == */* ]]; then
+              __after="${__rest##*/}"
+              if [[ "$__after" == *@* ]]; then
+                __ver="${__after##*@}"; __name="$__prefix:${__rest%@*}"
               else
-                ver="latest"; name="$prefix:$rest"
+                __ver="latest"; __name="$__prefix:$__rest"
               fi
-            elif [[ "$item" == *@* ]]; then
-              name="${item%@*}"; ver="${item##*@}"
-            elif [ "$prefix" != "$item" ]; then
-              name="$prefix"; ver="$rest"
+            elif [[ "$__item" == *@* ]]; then
+              __name="${__item%@*}"; __ver="${__item##*@}"
+            elif [ "$__prefix" != "$__item" ]; then
+              __name="$__prefix"; __ver="$__rest"
             else
-              name="$item"; ver="latest"
+              __name="$__item"; __ver="latest"
             fi
-            tools="$tools $name@$ver"
+            TOOLS="$TOOLS $__name@$__ver"
           done <<< "$(printf '%s' "${TOOLCHAIN:-}" | tr ',' '\n')"
-          tools="${tools# }"
-          echo "Tools: ${tools:-<none>}"
-          if [ -z "$tools" ]; then exit 0; fi
+          TOOLS="${TOOLS# }"
+
+          if [ -z "$TOOLS" ]; then
+            echo "TOOLCHAIN is not set — skipping tool installation."
+          else
+            echo "Tools: $TOOLS"
+          fi
+
+          if [ -n "${MISE_DATA_DIR:-}" ]; then
+            MISE_DIR="$MISE_DATA_DIR"
+          elif [ -n "${XDG_DATA_HOME:-}" ]; then
+            MISE_DIR="$XDG_DATA_HOME/mise"
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            MISE_DIR="$LOCALAPPDATA/mise"
+          else
+            MISE_DIR="$HOME/.local/share/mise"
+          fi
+          MISE_DIR="$(printf '%s' "$MISE_DIR" | tr '\\' '/')"
+
+          # The key is shared by every job that installs the toolchain; keep its format stable,
+          # or caches already saved on the default branch stop matching.
+          TOOLCHAIN_KEY="mise-${RUNNER_OS}-${RUNNER_ARCH}-${MISE_FILES_HASH:-}-${TOOLS}"
+
+          unset __backends __item __prefix __rest __after __ver __name
+          # <<< .github/snippets/toolchain-resolve.sh
+
+          {
+            echo "tools=$TOOLS"
+            echo "mise_dir=$MISE_DIR"
+            echo "toolchain_key=$TOOLCHAIN_KEY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Cache toolchain
+        if: ${{ steps.toolchain.outputs.tools != '' }}
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.toolchain.outputs.mise_dir }}
+          key: ${{ steps.toolchain.outputs.toolchain_key }}
+
+      - name: Install toolchain
+        if: ${{ steps.toolchain.outputs.tools != '' }}
+        env:
+          TOOLS: ${{ steps.toolchain.outputs.tools }}
+          MISE_DIR: ${{ steps.toolchain.outputs.mise_dir }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # >>> .github/snippets/mise-download.sh
+          # Downloads the mise binary into MISE_BIN_DIR and sets MISE to its path. The CDN serves
+          # the latest release; when it is down, the version comes from the VERSION endpoint or
+          # the GitHub API, and as a last resort a pinned release is used.
+          # Inputs: GH_TOKEN (optional, for the GitHub API).
+          case "$RUNNER_OS" in
+            Linux)   __os=linux ;;
+            macOS)   __os=macos ;;
+            Windows) __os=windows ;;
+            *) echo "::error::Unsupported OS RUNNER_OS='$RUNNER_OS'." >&2; exit 1 ;;
+          esac
+          case "$RUNNER_ARCH" in
+            X64)   __arch=x64 ;;
+            ARM64) __arch=arm64 ;;
+            *) echo "::error::Unsupported architecture RUNNER_ARCH='$RUNNER_ARCH'." >&2; exit 1 ;;
+          esac
+          __ext=""
+          if [ "$__os" = "windows" ]; then __ext=".exe"; fi
+
+          __tmp="$RUNNER_TEMP"
+          if command -v cygpath >/dev/null 2>&1; then __tmp="$(cygpath -u "$RUNNER_TEMP")"; fi
+          MISE_BIN_DIR="$__tmp/mise-bin"
+          mkdir -p "$MISE_BIN_DIR"
+          MISE="$MISE_BIN_DIR/mise${__ext}"
 
           MISE_FALLBACK_VERSION="v2026.7.12"
-          bin_dir="$RUNNER_TEMP/mise-bin"
-          mkdir -p "$bin_dir"
-          mise="$bin_dir/mise"
 
-          try_download() {
-            curl -fsSL --retry 3 --retry-delay 2 -o "$mise" "$1" 2>/dev/null || return 1
-            chmod +x "$mise" 2>/dev/null || true
-            "$mise" --version >/dev/null 2>&1 || return 1
+          __try_download() {
+            echo "  trying $1"
+            curl -fsSL --retry 3 --retry-delay 2 -o "$MISE" "$1" 2>/dev/null || return 1
+            chmod +x "$MISE" 2>/dev/null || true
+            "$MISE" --version >/dev/null 2>&1 || return 1
             return 0
           }
-          release_url() {
-            printf 'https://github.com/jdx/mise/releases/download/%s/mise-%s-linux-x64' "$1" "$1"
+
+          __release_url() {
+            printf 'https://github.com/jdx/mise/releases/download/%s/mise-%s-%s-%s%s' "$1" "$1" "$__os" "$__arch" "$__ext"
           }
 
-          ok=false
-          if try_download "https://mise.jdx.dev/mise-latest-linux-x64"; then
-            ok=true
+          __ok=false
+          echo "Resolving mise version…"
+          if __try_download "https://mise.jdx.dev/mise-latest-${__os}-${__arch}${__ext}"; then
+            __ok=true
           else
-            ver=$(curl -fsSL --retry 2 https://mise.jdx.dev/VERSION 2>/dev/null | tr -d '[:space:]' || true)
-            if [ -n "$ver" ]; then
-              case "$ver" in v*) ;; *) ver="v$ver" ;; esac
-              if try_download "$(release_url "$ver")"; then ok=true; fi
+            echo "::warning::The mise CDN is unavailable — trying the VERSION endpoint and the GitHub API."
+            __ver=$(curl -fsSL --retry 2 https://mise.jdx.dev/VERSION 2>/dev/null | tr -d '[:space:]' || true)
+            if [ -n "$__ver" ]; then
+              case "$__ver" in v*) ;; *) __ver="v$__ver" ;; esac
+              if __try_download "$(__release_url "$__ver")"; then __ok=true; fi
             fi
-            if [ "$ok" != "true" ]; then
-              echo "::warning::The mise CDN is unavailable — falling back to the pinned version $MISE_FALLBACK_VERSION."
-              if try_download "$(release_url "$MISE_FALLBACK_VERSION")"; then ok=true; fi
+            if [ "$__ok" != "true" ]; then
+              __api="https://api.github.com/repos/jdx/mise/releases/latest"
+              if [ -n "${GH_TOKEN:-}" ]; then
+                __body=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$__api" 2>/dev/null || true)
+              else
+                __body=$(curl -fsSL "$__api" 2>/dev/null || true)
+              fi
+              __ver=$(printf '%s' "$__body" | grep -m1 '"tag_name"' | sed 's/.*"tag_name"[^"]*"\([^"]*\)".*/\1/' || true)
+              if [ -n "$__ver" ] && __try_download "$(__release_url "$__ver")"; then __ok=true; fi
+            fi
+            if [ "$__ok" != "true" ]; then
+              echo "::warning::Neither the CDN nor the API responded — falling back to the pinned version $MISE_FALLBACK_VERSION."
+              if __try_download "$(__release_url "$MISE_FALLBACK_VERSION")"; then __ok=true; fi
             fi
           fi
 
-          if [ "$ok" != "true" ]; then
+          if [ "$__ok" != "true" ]; then
             echo "::error::Failed to download mise. Check the runner's access to github.com and mise.jdx.dev." >&2
             exit 1
           fi
+          echo "mise $("$MISE" --version)"
 
-          TOOLS="$tools"
+          unset -f __try_download __release_url
+          unset __os __arch __ext __tmp __ok __ver __api __body
+          # <<< .github/snippets/mise-download.sh
+
           # >>> .github/snippets/toolchain-deps.sh
           # Some mise plugins build a tool from source and expect the system libraries
           # to be present. The built binary links against them dynamically, so they are
@@ -1777,13 +1946,24 @@ jobs:
           unset __pkgs __missing __p __t __n
           # <<< .github/snippets/toolchain-deps.sh
 
+          # >>> .github/snippets/mise-use.sh
+          # Installs TOOLS with mise and puts them on PATH for the following steps. A tool
+          # already in MISE_DIR (restored from the toolchain cache) is not installed again.
+          # Inputs: MISE, MISE_BIN_DIR, MISE_DIR, TOOLS.
           export MISE_YES=1 MISE_PYTHON_COMPILE=false
-          "$mise" use --global $tools
-          "$mise" ls --installed
+          # shellcheck disable=SC2086 # TOOLS is a list of specs
+          "$MISE" use --global $TOOLS
+          "$MISE" ls --installed
+
           {
-            "$mise" bin-paths 2>/dev/null || true
-            printf '%s\n%s\n' "$HOME/.local/share/mise/shims" "$bin_dir"
-          } >> "$GITHUB_PATH"
+            "$MISE" bin-paths 2>/dev/null || true
+            printf '%s\n%s\n' "$MISE_DIR/shims" "$MISE_BIN_DIR"
+          } | while IFS= read -r __p; do
+            [ -z "$__p" ] && continue
+            if command -v cygpath >/dev/null 2>&1; then __p="$(cygpath -w "$__p")"; fi
+            printf '%s\n' "$__p" >> "$GITHUB_PATH"
+          done
+          # <<< .github/snippets/mise-use.sh
 
       - name: Build
         if: ${{ env.SCOPE == 'selective' && env.BUILD_COMMAND != '' }}
