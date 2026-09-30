@@ -4,29 +4,30 @@ on:
   workflow_dispatch:
     inputs:
       source_repo:
-        description: 'Source git repository (URL, owner/repo, self; empty = server, or current repo when source_ref is set)'
+        description: 'Source git repository: URL, owner/repo or self. Empty = the server (or this repository when source_ref is set).'
         required: false
         type: string
         default: ''
       source_ref:
-        description: 'Source branch / tag / commit'
+        description: 'Source branch, tag or commit. Empty = default branch of the source.'
         required: false
         type: string
         default: ''
       source_path:
-        description: 'Subdirectory inside the source repository'
+        description: 'Subdirectory inside the source repository. Empty = repository root.'
         required: false
         type: string
         default: ''
       commits:
-        description: 'Comma-separated commits to grab files from'
+        description: 'Comma-separated commits to grab files from. Empty = grab everything.'
         required: false
         type: string
         default: ''
       deploy_mirror:
-        description: 'Keep all:false; delete files removed on server:true;'
+        description: 'Deletions: false = keep all, true = delete files missing in the source.'
         required: false
-        type: string
+        type: choice
+        options: ['false', 'true']
         default: 'false'
 
 permissions:

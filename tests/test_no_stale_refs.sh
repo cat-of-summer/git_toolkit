@@ -51,7 +51,7 @@ done
 if [ -z "$missing" ]; then
   pass "контракт закрыт от подмены через vars проекта"
 else
-  fail "контракт закрыт от подмены через vars проекта" "не попали в DENY шага Collect vars & secrets:$missing"
+  fail "контракт закрыт от подмены через vars проекта" "не попали в DENY шага Collect vars and secrets:$missing"
 fi
 
 suite_result "no-stale-refs"

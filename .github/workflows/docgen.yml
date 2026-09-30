@@ -9,19 +9,17 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   docgen:
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        shell: bash -l {0}
-
     steps:
-
       - name: Resolve ref
         id: ref
-        shell: bash
         env:
           MULTIPLE_PACKAGES: ${{ vars.MULTIPLE_PACKAGES }}
         run: |
@@ -128,12 +126,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Configure git user for commits
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Generate docs structure
+      - name: Generate docs
         run: |
           set -euo pipefail
 
@@ -590,27 +583,26 @@ jobs:
           done < <(find "$DOCS_DIR" -type d | sort -r)
 
           index_count="$(find "$DOCS_DIR" -type f -name 'README.md' | wc -l)"
-          echo "Pass 2 done: ${index_count} index files generated"
+          echo "Pages created: ${new_count}, deleted: ${orphan_count}, index files: ${index_count}"
 
-      - name: Stage docs changes
+      - name: Commit and push
         run: |
           set -euo pipefail
-          git add docs/
-          git rm -r --cached node_modules 2>/dev/null || true
 
-      - name: Commit & push if there are changes
-        run: |
-          set -uo pipefail
+          git add docs/
+          git rm -r -q --cached node_modules 2>/dev/null || true
 
           if [ "$REF_TYPE" != "branch" ]; then
-            echo "::notice::$REF_TYPE '$REF_NAME' — пуш делается только в ветку, изменения не коммитятся."
+            echo "::notice::$REF_TYPE '$REF_NAME' — changes are pushed to branches only, nothing is committed."
             exit 0
           fi
 
           if git diff --cached --quiet; then
-            echo "No docs changes to commit"
+            echo "No docs changes to commit."
             exit 0
           fi
 
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -m "auto:generated_doc [skip ci]"
           git push origin "HEAD:$REF_NAME"

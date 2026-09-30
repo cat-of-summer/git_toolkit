@@ -8,19 +8,17 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   minify:
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        shell: bash -l {0}
-
     steps:
-
       - name: Resolve ref
         id: ref
-        shell: bash
         env:
           MULTIPLE_PACKAGES: ${{ vars.MULTIPLE_PACKAGES }}
         run: |
@@ -121,40 +119,30 @@ jobs:
           unset __event __raw_type __raw_name __pr __head __prefix __vpart
           # <<< .github/snippets/resolve-ref.sh
 
-      - uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Configure git user for commits
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Install latest minifiers
-        run: |
-          set -euo pipefail
-          npm install --no-audit --no-fund --no-save csso-cli terser@latest
-
-      - name: Find and minify .css & .js
+      - name: Minify CSS and JS
         run: |
           set -euo pipefail
           shopt -s globstar nullglob
+
+          npm install --no-audit --no-fund --no-save csso-cli terser@latest
 
           PARALLEL=$(nproc 2>/dev/null || echo 2)
 
           CSSO="./node_modules/.bin/csso"
           TERSER="./node_modules/.bin/terser"
 
-          if [ ! -x "${CSSO}" ]; then
-            echo "Error: csso not found at ${CSSO}"
-            exit 2
-          fi
-
-          if [ ! -x "${TERSER}" ]; then
-            echo "Error: terser not found at ${TERSER}"
-            exit 2
-          fi
+          for bin in "$CSSO" "$TERSER"; do
+            if [ ! -x "$bin" ]; then
+              echo "::error::Minifier not found at $bin." >&2
+              exit 2
+            fi
+          done
 
           EXCLUDE_PATHS=(
             './node_modules'
@@ -177,50 +165,43 @@ jobs:
                   *.css|*.CSS)
                     out="${f%.*}.min.css"
                     printf "[css] %s -> %s\n" "$pf" "${out#./}"
-                    if '"${CSSO}"' "$f" --output "$out"; then
-                      :
-                    else
-                      printf "ERROR minifying css: %s\n" "$pf" >&2
+                    if ! '"${CSSO}"' "$f" --output "$out"; then
+                      printf "::error::Failed to minify CSS: %s\n" "$pf" >&2
                       exit 1
                     fi
                     ;;
                   *.js|*.JS)
                     out="${f%.*}.min.js"
                     printf "[js]  %s -> %s\n" "$pf" "${out#./}"
-                    if '"${TERSER}"' "$f" -o "$out" --compress --mangle; then
-                      :
-                    else
-                      printf "ERROR minifying js: %s\n" "$pf" >&2
+                    if ! '"${TERSER}"' "$f" -o "$out" --compress --mangle; then
+                      printf "::error::Failed to minify JS: %s\n" "$pf" >&2
                       exit 1
                     fi
-                    ;;
-                  *)
                     ;;
                 esac
               ' _ {}
 
-      - name: Stage only minified files for commit
+      - name: Commit and push
         run: |
           set -euo pipefail
+
+          # Stage only the minified files, never the minifiers themselves.
           find . -type f \( -iname '*.min.css' -o -iname '*.min.js' \) \
             ! -path './.git/*' -print0 \
             | xargs -0 --no-run-if-empty git add --
-          git rm -r --cached node_modules || true
-
-      - name: Commit & push if there are changes
-        run: |
-          set -uo pipefail
+          git rm -r -q --cached node_modules 2>/dev/null || true
 
           if [ "$REF_TYPE" != "branch" ]; then
-            echo "::notice::$REF_TYPE '$REF_NAME' — пуш делается только в ветку, изменения не коммитятся."
+            echo "::notice::$REF_TYPE '$REF_NAME' — changes are pushed to branches only, nothing is committed."
             exit 0
           fi
 
           if git diff --cached --quiet; then
-            echo "No minified changes to commit"
+            echo "No minified changes to commit."
             exit 0
           fi
 
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -m "auto:minify [skip ci]"
-
           git push origin "HEAD:$REF_NAME"

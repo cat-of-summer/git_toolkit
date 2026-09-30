@@ -9,90 +9,29 @@ on:
   pull_request: {}
   workflow_dispatch:
     inputs:
-      run_ci:
-        description: 'Build and test (job ci)'
-        required: false
-        type: boolean
-        default: true
-      run_release:
-        description: 'Create a Release and publish to registries (tag only)'
-        required: false
-        type: boolean
-        default: true
-      run_cd:
-        description: 'Deploy (job cd)'
-        required: false
-        type: boolean
-        default: true
-      environment:
-        description: 'Override the environment (resolved automatically by default)'
-        required: false
-        type: string
-        default: ''
-      runs_on:
-        description: 'Override RUNS_ON: ubuntu-latest,windows-latest'
-        required: false
-        type: string
-        default: ''
-      publish_method:
-        description: 'Override PUBLISH_METHOD'
-        required: false
-        type: choice
-        options: ['', 'npm', 'docker', 'packagist']
-        default: ''
       commits:
-        description: 'Comma-separated commits to deploy'
+        description: 'Comma-separated commits to deploy. Empty = deploy the whole tree.'
         required: false
         type: string
         default: ''
       deploy_mirror:
-        description: 'Keep all:false; delete files removed in commits:true; mirror sync (deletes untracked):full'
+        description: 'Deletions on the server: false = keep all, true = delete files removed in the commits, full = exact mirror. default = DEPLOY_MIRROR variable.'
         required: false
         type: choice
-        options: ['false', 'true', 'full']
-        default: 'false'
+        options: ['default', 'false', 'true', 'full']
+        default: 'default'
   workflow_call:
     inputs:
-      run_ci:
-        description: 'Build and test (job ci)'
-        required: false
-        type: boolean
-        default: true
-      run_release:
-        description: 'Create a Release and publish to registries (tag only)'
-        required: false
-        type: boolean
-        default: true
-      run_cd:
-        description: 'Deploy (job cd)'
-        required: false
-        type: boolean
-        default: true
-      environment:
-        description: 'Override the environment (resolved automatically by default)'
-        required: false
-        type: string
-        default: ''
-      runs_on:
-        description: 'Override RUNS_ON: ubuntu-latest,windows-latest'
-        required: false
-        type: string
-        default: ''
-      publish_method:
-        description: "Override PUBLISH_METHOD ('' | npm | docker | packagist)"
-        required: false
-        type: string
-        default: ''
       commits:
-        description: 'Comma-separated commits to deploy'
+        description: 'Comma-separated commits to deploy. Empty = deploy the whole tree.'
         required: false
         type: string
         default: ''
       deploy_mirror:
-        description: 'Keep all:false; delete files removed in commits:true; mirror sync (deletes untracked):full'
+        description: 'Deletions on the server: false = keep all, true = delete files removed in the commits, full = exact mirror. Empty or default = DEPLOY_MIRROR variable.'
         required: false
         type: string
-        default: 'false'
+        default: ''
     secrets:
       DEPLOY_KEY:
         required: false
@@ -108,6 +47,10 @@ on:
 permissions:
   contents: write
   packages: write
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
 
@@ -127,7 +70,6 @@ jobs:
     steps:
       - name: Resolve ref
         id: ref
-        shell: bash
         env:
           MULTIPLE_PACKAGES: ${{ vars.MULTIPLE_PACKAGES }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -240,10 +182,8 @@ jobs:
 
       - name: Resolve environment
         id: env
-        shell: bash
         env:
           MULTIPLE_PACKAGES: ${{ vars.MULTIPLE_PACKAGES }}
-          INPUT_ENVIRONMENT: ${{ inputs.environment }}
           REF_TYPE: ${{ steps.ref.outputs.ref_type }}
           REF_NAME: ${{ steps.ref.outputs.ref_name }}
           REF_BRANCH: ${{ steps.ref.outputs.ref_branch }}
@@ -258,13 +198,8 @@ jobs:
           __fail() { echo "::error::$1" >&2; exit 1; }
 
           MULTIPLE_PACKAGES="$(__trim "${MULTIPLE_PACKAGES:-}" | tr '[:upper:]' '[:lower:]')"
-          __input_env="$(__trim "${INPUT_ENVIRONMENT:-}")"
 
-          if [ -n "$__input_env" ]; then
-            REF_BRANCH="$(__slug "$__input_env")"
-            echo "Environment overridden by the workflow_dispatch input."
-
-          elif [ -z "${REF_BRANCH:-}" ]; then
+          if [ -z "${REF_BRANCH:-}" ]; then
             __found="$(git branch -r --contains "$REF_COMMIT" 2>/dev/null | grep -v HEAD | head -1 | sed 's#.*origin/##' | tr -d '[:space:]' || true)"
             if [ -z "$__found" ]; then
               __fail "Cannot tell which branch tag '$REF_NAME' was cut from: commit $REF_COMMIT is not on any remote branch. Checkout with fetch-depth: 0 is required."
@@ -295,7 +230,7 @@ jobs:
           echo "REF_BRANCH=$REF_BRANCH" >> "$GITHUB_ENV"
 
           unset -f __slug __trim __fail
-          unset __input_env __found __suffix
+          unset __found __suffix
           # <<< .github/snippets/resolve-env.sh
 
   resolve-config:
@@ -314,6 +249,7 @@ jobs:
       publish_method: ${{ steps.decide.outputs.publish_method }}
       deploy_method: ${{ steps.decide.outputs.deploy_method }}
       deploy_mirror: ${{ steps.decide.outputs.deploy_mirror }}
+      apt_packages: ${{ steps.decide.outputs.apt_packages }}
 
     env:
       ACTION_TRIGGER: ${{ vars.ACTION_TRIGGER || 'workflow_dispatch' }}
@@ -324,28 +260,26 @@ jobs:
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
       DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
       DEPLOY_METHOD: ${{ vars.DEPLOY_METHOD || 'command' }}
-      DEPLOY_MIRROR: ${{ inputs.deploy_mirror || vars.DEPLOY_MIRROR || 'false' }}
+      DEPLOY_MIRROR: ${{ (inputs.deploy_mirror != 'default' && inputs.deploy_mirror) || vars.DEPLOY_MIRROR || 'false' }}
       DEPLOY_LAST_COMMITS: ${{ vars.DEPLOY_LAST_COMMITS || 'false' }}
 
     steps:
       - name: Decide what to run
         id: decide
-        shell: bash
         env:
           EVENT: ${{ github.event_name }}
           REF_TYPE: ${{ needs.resolve-ref.outputs.ref_type }}
           REF_NAME_NORM: ${{ needs.resolve-ref.outputs.ref_name_norm }}
           INPUT_COMMITS: ${{ inputs.commits }}
           PUSH_COMMITS: ${{ join(github.event.commits.*.id, ',') }}
-          INPUT_RUN_CI: ${{ inputs.run_ci }}
-          INPUT_RUN_RELEASE: ${{ inputs.run_release }}
-          INPUT_RUN_CD: ${{ inputs.run_cd }}
-          RUNS_ON: ${{ inputs.runs_on || vars.RUNS_ON }}
-          PUBLISH_METHOD: ${{ inputs.publish_method || vars.PUBLISH_METHOD }}
+          RUNS_ON: ${{ vars.RUNS_ON }}
+          PUBLISH_METHOD: ${{ vars.PUBLISH_METHOD }}
         run: |
           set -euo pipefail
 
           lower() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
+          fail()  { echo "::error::$1" >&2; exit 1; }
+
           ACTION_TRIGGER="$(lower "$ACTION_TRIGGER")"
           DEPLOY_METHOD="$(lower "$DEPLOY_METHOD")"
           DEPLOY_MIRROR="$(lower "$DEPLOY_MIRROR")"
@@ -354,10 +288,7 @@ jobs:
 
           case "$ACTION_TRIGGER" in
             workflow_dispatch|push|branch|tag) ;;
-            *)
-              echo "::error::Invalid ACTION_TRIGGER='$ACTION_TRIGGER'. Allowed: workflow_dispatch | push | branch | tag." >&2
-              exit 1
-              ;;
+            *) fail "Invalid ACTION_TRIGGER='$ACTION_TRIGGER'. Allowed: workflow_dispatch | push | branch | tag." ;;
           esac
 
           PR=false
@@ -381,8 +312,7 @@ jobs:
               fi
               ;;
             *)
-              echo "::error::resolve-ref returned REF_TYPE='$REF_TYPE' — expected tag | branch | pr." >&2
-              exit 1
+              fail "resolve-ref returned REF_TYPE='$REF_TYPE' — expected tag | branch | pr."
               ;;
           esac
 
@@ -401,19 +331,17 @@ jobs:
           if [ "$ACTIVE" = "true" ] && [ "$REF_TYPE" = "tag" ]; then RUN_RELEASE=true; fi
           if [ "$ACTIVE" = "true" ] && [ "$PR" != "true" ] && [ "$HAVE_CD" = "true" ]; then RUN_CD=true; fi
 
-          if [ "${INPUT_RUN_CI:-}" = "false" ];      then RUN_CI=false; fi
-          if [ "${INPUT_RUN_RELEASE:-}" = "false" ]; then RUN_RELEASE=false; fi
-          if [ "${INPUT_RUN_CD:-}" = "false" ];      then RUN_CD=false; fi
-
           SCOPE=""
           COMMITS=""
+          APT_PACKAGES=""
           if [ "$RUN_CD" = "true" ]; then
             case "$DEPLOY_METHOD" in
               command|rsync|ftp|git) ;;
-              *)
-                echo "::error::Invalid DEPLOY_METHOD='$DEPLOY_METHOD'. Allowed: command | rsync | ftp | git." >&2
-                exit 1
-                ;;
+              *) fail "Invalid DEPLOY_METHOD='$DEPLOY_METHOD'. Allowed: command | rsync | ftp | git." ;;
+            esac
+            case "$DEPLOY_MIRROR" in
+              false|true|full) ;;
+              *) fail "Invalid DEPLOY_MIRROR='$DEPLOY_MIRROR'. Allowed: false | true | full." ;;
             esac
 
             if [ "$DEPLOY_METHOD" = "command" ]; then
@@ -433,6 +361,28 @@ jobs:
                 SCOPE="full"
               fi
             fi
+
+            if [ "$SCOPE" = "selective" ]; then
+              if [ "$DEPLOY_METHOD" = "git" ]; then
+                fail "DEPLOY_METHOD=git is not supported in selective mode (workflow_dispatch with commits or DEPLOY_LAST_COMMITS=true): git deploys the whole branch, not a file subset."
+              fi
+              if [ "$DEPLOY_MIRROR" = "full" ]; then
+                fail "DEPLOY_MIRROR=full is incompatible with selective deploy (DEPLOY_LAST_COMMITS=true or workflow_dispatch with commits): 'full' is an exact mirror of the whole tree, while selective mode works with a subset of files. To delete files removed in the deployed commits, use DEPLOY_MIRROR=true."
+              fi
+              if [ "$RUN_CI" = "true" ]; then
+                echo "::warning::Selective deploy does not ship build results from job 'ci': the file list comes from git history, and built files are not in git. Deploying them requires a full deploy."
+              fi
+            fi
+
+            # System packages the cd job installs: lftp for FTP, sshpass when DEPLOY_KEY is a password.
+            if [ "$DEPLOY_METHOD" = "ftp" ]; then
+              APT_PACKAGES="lftp"
+            else
+              case "${DEPLOY_KEY%%$'\n'*}" in
+                -----BEGIN*) ;;
+                *) APT_PACKAGES="sshpass" ;;
+              esac
+            fi
           fi
 
           OS_LIST="${RUNS_ON:-}"
@@ -445,19 +395,17 @@ jobs:
             | paste -sd, - || true)
           OS_JSON="[${OS_JSON}]"
           if [ "$OS_JSON" = "[]" ]; then
-            echo "::error::RUNS_ON='$OS_LIST' does not contain a single runner." >&2
-            exit 1
+            fail "RUNS_ON='$OS_LIST' does not contain a single runner."
           fi
 
           case "${PUBLISH_METHOD:-}" in
             ''|npm|docker|packagist) ;;
-            *) echo "::error::Unknown PUBLISH_METHOD='$PUBLISH_METHOD'. Allowed: npm | docker | packagist (empty = do not publish)." >&2
-               exit 1 ;;
+            *) fail "Unknown PUBLISH_METHOD='$PUBLISH_METHOD'. Allowed: npm | docker | packagist (empty = do not publish)." ;;
           esac
 
           echo "ACTION_TRIGGER=$ACTION_TRIGGER event=$EVENT ref_type=$REF_TYPE ref_name_norm=$REF_NAME_NORM active=$ACTIVE pr=$PR"
           echo "run_ci=$RUN_CI run_release=$RUN_RELEASE run_cd=$RUN_CD"
-          echo "method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR scope=$SCOPE os=$OS_JSON publish=${PUBLISH_METHOD:-<none>}"
+          echo "method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR scope=$SCOPE commits='$COMMITS' os=$OS_JSON publish=${PUBLISH_METHOD:-<none>} apt=${APT_PACKAGES:-<none>}"
           {
             echo "run_ci=$RUN_CI"
             echo "run_release=$RUN_RELEASE"
@@ -468,6 +416,7 @@ jobs:
             echo "publish_method=${PUBLISH_METHOD:-}"
             echo "deploy_method=$DEPLOY_METHOD"
             echo "deploy_mirror=$DEPLOY_MIRROR"
+            echo "apt_packages=$APT_PACKAGES"
           } >> "$GITHUB_OUTPUT"
 
   ci:
@@ -496,13 +445,13 @@ jobs:
       CI_COMMAND: ${{ vars.CI_COMMAND }}
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-ref.outputs.ref_type == 'tag' && needs.resolve-ref.outputs.ref_name || '' }}
           submodules: recursive
 
-      - name: Collect vars & secrets
-        shell: bash
+      - name: Collect vars and secrets
         env:
           VARS_JSON: ${{ toJSON(vars) }}
           ALL_SECRETS: ${{ toJSON(secrets) }}
@@ -556,13 +505,16 @@ jobs:
 
           echo "CTX_ENV=$CTX" >> "$GITHUB_ENV"
 
-      - name: Resolve toolchain
-        id: tc
-        shell: bash
+      - name: Resolve caches
+        id: resolve
         env:
           TOOLCHAIN: ${{ vars.TOOLCHAIN }}
+          CACHE_PATHS: ${{ vars.CACHE_PATHS }}
+          CACHE_KEY_FILES: ${{ vars.CACHE_KEY_FILES }}
         run: |
           set -euo pipefail
+
+          # --- Toolchain (mise) ---
           backends="ubi,aqua,asdf,cargo,go,npm,pipx,gem,dotnet,spm,vfox,http"
           tools=""
           while IFS= read -r item; do
@@ -610,18 +562,90 @@ jobs:
             echo "mise_dir=$mise_dir"
           } >> "$GITHUB_OUTPUT"
 
+          # --- Dependency cache ---
+          if [ -z "${CACHE_PATHS:-}" ]; then
+            echo "CACHE_PATHS is not set — skipping the dependency cache."
+            exit 0
+          fi
+
+          split() {
+            printf '%s' "${1:-}" \
+              | tr ',' '\n' \
+              | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+              | grep -v '^$' || true
+          }
+
+          PATHS="$(split "$CACHE_PATHS")"
+          if [ -z "$PATHS" ]; then
+            echo "::error::CACHE_PATHS='$CACHE_PATHS' does not contain a single path." >&2
+            exit 1
+          fi
+
+          PATTERNS="$(split "${CACHE_KEY_FILES:-}")"
+          if [ -z "$PATTERNS" ]; then
+            echo "::error::CACHE_PATHS is set, but CACHE_KEY_FILES is empty. Without key files the cache would be saved once and never refreshed — list the lock files the dependencies come from, e.g. 'package-lock.json'." >&2
+            exit 1
+          fi
+
+          shopt -s globstar nullglob dotglob
+
+          files=()
+          while IFS= read -r pattern; do
+            [ -z "$pattern" ] && continue
+            eval "matches=( $pattern )"
+            for f in "${matches[@]}"; do
+              [ -f "$f" ] && files+=("$f")
+            done
+          done <<< "$PATTERNS"
+
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No files matched CACHE_KEY_FILES: $CACHE_KEY_FILES" >&2
+            exit 1
+          fi
+
+          sha() {
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi
+          }
+
+          HASH=$(
+            printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | while IFS= read -r f; do
+              printf '%s  %s\n' "$(sha < "$f" | cut -d' ' -f1)" "$f"
+            done | sha | cut -c1-64
+          )
+
+          echo "Cache paths:"
+          printf '%s\n' "$PATHS" | sed 's/^/  /'
+          echo "Key files:"
+          printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | sed 's/^/  /'
+          echo "Key hash: $HASH"
+
+          {
+            echo "dep_paths<<EOF"
+            printf '%s\n' "$PATHS"
+            echo "EOF"
+            echo "dep_hash=$HASH"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Cache toolchain
-        if: ${{ steps.tc.outputs.tools != '' }}
+        if: ${{ steps.resolve.outputs.tools != '' }}
         uses: actions/cache@v6
         with:
-          path: ${{ steps.tc.outputs.mise_dir }}
-          key: mise-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.mise.toml', '.tool-versions') }}-${{ steps.tc.outputs.tools }}
+          path: ${{ steps.resolve.outputs.mise_dir }}
+          key: mise-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.mise.toml', '.tool-versions') }}-${{ steps.resolve.outputs.tools }}
+
+      - name: Cache dependencies
+        if: ${{ vars.CACHE_PATHS != '' }}
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.resolve.outputs.dep_paths }}
+          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.dep_hash }}
+          restore-keys: deps-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install toolchain
-        if: ${{ steps.tc.outputs.tools != '' }}
-        shell: bash
+        if: ${{ steps.resolve.outputs.tools != '' }}
         env:
-          TOOLS: ${{ steps.tc.outputs.tools }}
+          TOOLS: ${{ steps.resolve.outputs.tools }}
+          MISE_DIR: ${{ steps.resolve.outputs.mise_dir }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -682,7 +706,7 @@ jobs:
               if [ -n "$ver" ] && try_download "$(release_url "$ver")"; then ok=true; fi
             fi
             if [ "$ok" != "true" ]; then
-              echo "::warning::Neither the CDN nor the API responded — falling back to the pinned working version $MISE_FALLBACK_VERSION."
+              echo "::warning::Neither the CDN nor the API responded — falling back to the pinned version $MISE_FALLBACK_VERSION."
               if try_download "$(release_url "$MISE_FALLBACK_VERSION")"; then ok=true; fi
             fi
           fi
@@ -699,92 +723,15 @@ jobs:
 
           {
             "$mise" bin-paths 2>/dev/null || true
-            printf '%s\n%s\n' "${{ steps.tc.outputs.mise_dir }}/shims" "$bin_dir"
+            printf '%s\n%s\n' "$MISE_DIR/shims" "$bin_dir"
           } | while IFS= read -r p; do
             [ -z "$p" ] && continue
             if command -v cygpath >/dev/null 2>&1; then p="$(cygpath -w "$p")"; fi
             printf '%s\n' "$p" >> "$GITHUB_PATH"
           done
 
-      - name: Resolve dependency cache
-        id: depcache
-        if: ${{ vars.CACHE_PATHS != '' }}
-        shell: bash
-        env:
-          CACHE_PATHS: ${{ vars.CACHE_PATHS }}
-          CACHE_KEY_FILES: ${{ vars.CACHE_KEY_FILES }}
-        run: |
-          set -euo pipefail
-
-          split() {
-            printf '%s' "${1:-}" \
-              | tr ',' '\n' \
-              | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-              | grep -v '^$' || true
-          }
-
-          PATHS="$(split "$CACHE_PATHS")"
-          if [ -z "$PATHS" ]; then
-            echo "::error::CACHE_PATHS='$CACHE_PATHS' does not contain a single path." >&2
-            exit 1
-          fi
-
-          PATTERNS="$(split "${CACHE_KEY_FILES:-}")"
-          if [ -z "$PATTERNS" ]; then
-            echo "::error::CACHE_PATHS is set, but CACHE_KEY_FILES is empty. Without key files the cache would be saved once and never refreshed — list the lock files the dependencies come from, e.g. 'package-lock.json'." >&2
-            exit 1
-          fi
-
-          shopt -s globstar nullglob dotglob
-
-          files=()
-          while IFS= read -r pattern; do
-            [ -z "$pattern" ] && continue
-            eval "matches=( $pattern )"
-            for f in "${matches[@]}"; do
-              [ -f "$f" ] && files+=("$f")
-            done
-          done <<< "$PATTERNS"
-
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::No files matched CACHE_KEY_FILES: $CACHE_KEY_FILES" >&2
-            exit 1
-          fi
-
-          sha() {
-            if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi
-          }
-
-          HASH=$(
-            printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | while IFS= read -r f; do
-              printf '%s  %s\n' "$(sha < "$f" | cut -d' ' -f1)" "$f"
-            done | sha | cut -c1-64
-          )
-
-          echo "Cache paths:"
-          printf '%s\n' "$PATHS" | sed 's/^/  /'
-          echo "Key files:"
-          printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | sed 's/^/  /'
-          echo "Key hash: $HASH"
-
-          {
-            echo "paths<<EOF"
-            printf '%s\n' "$PATHS"
-            echo "EOF"
-            echo "hash=$HASH"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Cache dependencies
-        if: ${{ vars.CACHE_PATHS != '' }}
-        uses: actions/cache@v6
-        with:
-          path: ${{ steps.depcache.outputs.paths }}
-          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ steps.depcache.outputs.hash }}
-          restore-keys: deps-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Build
-        if: ${{ env.BUILD_COMMAND != '' }}
-        shell: bash
+      - name: Build and test
+        if: ${{ env.BUILD_COMMAND != '' || env.CI_COMMAND != '' }}
         env:
           MATRIX_OS: ${{ matrix.os }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -794,28 +741,22 @@ jobs:
 
           if [ -n "${CTX_ENV:-}" ] && [ -f "$CTX_ENV" ]; then . "$CTX_ENV"; fi
 
-          eval "${BUILD_COMMAND//$'\r'/}"
-
-      - name: Run CI command
-        if: ${{ env.CI_COMMAND != '' }}
-        shell: bash
-        env:
-          MATRIX_OS: ${{ matrix.os }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          if [ -n "${CTX_ENV:-}" ] && [ -f "$CTX_ENV" ]; then . "$CTX_ENV"; fi
-
-          eval "${CI_COMMAND//$'\r'/}"
+          # Each command runs in its own subshell: a `cd` or `exit` in BUILD_COMMAND
+          # must not leak into CI_COMMAND.
+          if [ -n "${BUILD_COMMAND:-}" ]; then
+            echo "=== Build ==="
+            ( eval "${BUILD_COMMAND//$'\r'/}" )
+          fi
+          if [ -n "${CI_COMMAND:-}" ]; then
+            echo "=== Test ==="
+            ( eval "${CI_COMMAND//$'\r'/}" )
+          fi
 
       # upload-artifact drops file modes: without tar, executables in node_modules/.bin,
       # esbuild/swc binaries and build scripts arrive downstream without +x (EACCES).
       - name: Pack workspace
         id: pack
         if: ${{ needs.resolve-config.outputs.run_release == 'true' || (needs.resolve-config.outputs.run_cd == 'true' && needs.resolve-config.outputs.scope == 'full') }}
-        shell: bash
         env:
           MATRIX_OS: ${{ matrix.os }}
         run: |
@@ -836,9 +777,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Cleanup collected context
+      - name: Clean up
         if: always()
-        shell: bash
         run: |
           set +e
           [ -n "${CTX_ENV:-}" ] && rm -f "$CTX_ENV"
@@ -855,12 +795,13 @@ jobs:
       RELEASE_FILES: ${{ vars.RELEASE_FILES }}
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-ref.outputs.ref_name }}
           submodules: recursive
 
-      - name: Download workspace from ci
+      - name: Download workspace
         id: workspace
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
         uses: actions/download-artifact@v8
@@ -869,9 +810,8 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/workspace
 
-      - name: Unpack workspace from ci
+      - name: Unpack workspace
         if: ${{ steps.workspace.outcome == 'success' }}
-        shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -886,10 +826,9 @@ jobs:
           done
           rm -rf "$RUNNER_TEMP/workspace"
 
-      - name: Flatten release asset names
+      - name: Stage release assets
         id: stage
         if: ${{ env.RELEASE_FILES != '' }}
-        shell: bash
         env:
           RUN_CI: ${{ needs.resolve-config.outputs.run_ci }}
         run: |
@@ -925,7 +864,7 @@ jobs:
             fi
             exit 1
           fi
-          printf 'Staged %s file(s):\n' "${#staged[@]}"
+          echo "Staged files: ${#staged[@]}"
           printf '  %s\n' "${staged[@]}"
           {
             echo "files<<EOF"
@@ -933,7 +872,7 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.resolve-ref.outputs.ref_name }}
@@ -956,12 +895,13 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-ref.outputs.ref_name }}
           submodules: recursive
 
-      - name: Download workspace from ci
+      - name: Download workspace
         id: workspace
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
         uses: actions/download-artifact@v8
@@ -970,9 +910,8 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/workspace
 
-      - name: Unpack workspace from ci
+      - name: Unpack workspace
         if: ${{ steps.workspace.outcome == 'success' }}
-        shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -989,7 +928,6 @@ jobs:
 
       - name: Resolve node version
         id: tc
-        shell: bash
         env:
           TOOLCHAIN: ${{ vars.TOOLCHAIN }}
         run: |
@@ -1010,23 +948,24 @@ jobs:
           fi
           echo "node=$node" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v7
+      - name: Set up Node for GitHub Packages
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ steps.tc.outputs.node }}
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@${{ github.repository_owner }}'
           package-manager-cache: false
 
-      - name: Drop committed .npmrc
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -f .npmrc
-
-      - name: Set version from tag
-        shell: bash
+      - name: Prepare package
         env:
           TAG: ${{ needs.resolve-ref.outputs.ref_tag }}
+          SUFFIX: ${{ needs.resolve-ref.outputs.pkg_suffix }}
         run: |
           set -euo pipefail
+
+          # A committed .npmrc would override the registry setup-node configured.
+          rm -f .npmrc
+
           if [[ ! "$TAG" =~ ^v([0-9]+(\.[0-9]+)*)$ ]]; then
             echo "::error::Tag '$TAG' is not a version tag (expected v#, v#.#, v#.#.#)." >&2
             exit 1
@@ -1037,28 +976,13 @@ jobs:
           echo "Tag $TAG -> package version $VERSION"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
 
-      - name: Apply per-branch package name
-        if: ${{ needs.resolve-ref.outputs.pkg_suffix != '' }}
-        shell: bash
-        env:
-          SUFFIX: ${{ needs.resolve-ref.outputs.pkg_suffix }}
-        run: |
-          set -euo pipefail
-          NAME=$(node -p "require('./package.json').name")
-          echo "MULTIPLE_PACKAGES: $NAME -> ${NAME}${SUFFIX}"
-          npm pkg set name="${NAME}${SUFFIX}"
-
-      - name: Setup Node for GitHub Packages
-        uses: actions/setup-node@v7
-        with:
-          node-version: ${{ steps.tc.outputs.node }}
-          registry-url: 'https://npm.pkg.github.com'
-          scope: '@${{ github.repository_owner }}'
-          package-manager-cache: false
+          if [ -n "$SUFFIX" ]; then
+            NAME=$(node -p "require('./package.json').name")
+            echo "MULTIPLE_PACKAGES: $NAME -> ${NAME}${SUFFIX}"
+            npm pkg set name="${NAME}${SUFFIX}"
+          fi
 
       - name: Publish to GitHub Packages
-        id: gpr
-        shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_PRIVATE: ${{ github.event.repository.private }}
@@ -1070,7 +994,7 @@ jobs:
           URL="https://npm.pkg.github.com"
           npm pkg delete publishConfig.registry >/dev/null 2>&1 || true
           if npm view "$PKG@$VERSION" version --registry "$URL" >/dev/null 2>&1; then
-            echo "$PKG@$VERSION already exists in GitHub Packages — skipping"
+            echo "$PKG@$VERSION already exists in GitHub Packages — skipping."
           else
             echo "npm publish --registry $URL --access $ACCESS"
             if ! npm publish --registry "$URL" --access "$ACCESS"; then
@@ -1081,7 +1005,7 @@ jobs:
             fi
           fi
 
-      - name: Setup Node for npmjs.org
+      - name: Set up Node for npmjs.org
         uses: actions/setup-node@v7
         with:
           node-version: ${{ steps.tc.outputs.node }}
@@ -1089,25 +1013,23 @@ jobs:
           scope: '@${{ github.repository_owner }}'
           package-manager-cache: false
 
-      - name: Ensure npm CLI supports trusted publishing
-        shell: bash
-        run: npm install -g npm@latest
-
       - name: Publish to npmjs.org
-        id: npmjs
-        shell: bash
         env:
           REPO_PRIVATE: ${{ github.event.repository.private }}
           NODE_AUTH_TOKEN: ''
           ENVIRONMENT: ${{ needs.resolve-ref.outputs.environment }}
         run: |
           set -euo pipefail
+
+          # Trusted publishing (OIDC) needs a recent npm CLI.
+          npm install -g npm@latest
+
           if [ "$REPO_PRIVATE" = "true" ]; then ACCESS="restricted"; else ACCESS="public"; fi
           PKG=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
           URL="https://registry.npmjs.org"
           if npm view "$PKG@$VERSION" version --registry "$URL" >/dev/null 2>&1; then
-            echo "$PKG@$VERSION already exists in npmjs.org — skipping"
+            echo "$PKG@$VERSION already exists in npmjs.org — skipping."
           else
             echo "npm publish --registry $URL --access $ACCESS (trusted publishing / OIDC)"
             if ! npm publish --registry "$URL" --access "$ACCESS"; then
@@ -1137,12 +1059,13 @@ jobs:
       BUILD_CONTEXT: ${{ vars.BUILD_CONTEXT || '.' }}
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-ref.outputs.ref_name }}
           submodules: recursive
 
-      - name: Download workspace from ci
+      - name: Download workspace
         id: workspace
         if: ${{ needs.resolve-config.outputs.run_ci == 'true' }}
         uses: actions/download-artifact@v8
@@ -1151,9 +1074,8 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/workspace
 
-      - name: Unpack workspace from ci
+      - name: Unpack workspace
         if: ${{ steps.workspace.outcome == 'success' }}
-        shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -1168,24 +1090,20 @@ jobs:
           done
           rm -rf "$RUNNER_TEMP/workspace"
 
-      - name: Validate Dockerfile
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ ! -f "$DOCKERFILE_PATH" ]; then
-            echo "::error::Dockerfile not found at '$DOCKERFILE_PATH'. The docker publish method requires a Dockerfile (set DOCKERFILE_PATH to override the default ./Dockerfile)." >&2
-            exit 1
-          fi
-
-      - name: Resolve image ref & version
+      - name: Resolve image
         id: meta
-        shell: bash
         env:
           SUFFIX: ${{ needs.resolve-ref.outputs.pkg_suffix }}
           BRANCH: ${{ needs.resolve-ref.outputs.environment }}
           TAG: ${{ needs.resolve-ref.outputs.ref_tag }}
         run: |
           set -euo pipefail
+
+          if [ ! -f "$DOCKERFILE_PATH" ]; then
+            echo "::error::Dockerfile not found at '$DOCKERFILE_PATH'. The docker publish method requires a Dockerfile (set DOCKERFILE_PATH to override the default ./Dockerfile)." >&2
+            exit 1
+          fi
+
           IMG="${DOCKER_IMAGE}${SUFFIX}"
           IMAGE="$(echo "${DOCKER_REGISTRY}/${IMG}" | tr '[:upper:]' '[:lower:]')"
 
@@ -1211,14 +1129,14 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Login to registry
+      - name: Log in to registry
         uses: docker/login-action@v4
         with:
           registry: ${{ env.DOCKER_REGISTRY }}
           username: ${{ vars.DOCKER_USERNAME || github.actor }}
           password: ${{ secrets.DOCKER_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Build & push image
+      - name: Build and push image
         uses: docker/build-push-action@v7
         with:
           context: ${{ env.BUILD_CONTEXT }}
@@ -1241,8 +1159,7 @@ jobs:
     environment: ${{ needs.resolve-ref.outputs.environment }}
 
     steps:
-      - name: Publish to Packagist (update; create on first publish)
-        shell: bash
+      - name: Publish to Packagist
         env:
           PACKAGIST_USERNAME: ${{ vars.PACKAGIST_USERNAME }}
           PACKAGIST_API_TOKEN: ${{ secrets.PACKAGIST_API_TOKEN }}
@@ -1250,6 +1167,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Update the package; create it when Packagist does not know it yet (first publish).
           update_code=$(curl -sS -o /tmp/packagist.out -w '%{http_code}' -X POST \
             -H 'Content-Type: application/json' \
             "https://packagist.org/api/update-package?username=${PACKAGIST_USERNAME}&apiToken=${PACKAGIST_API_TOKEN}" \
@@ -1262,7 +1180,7 @@ jobs:
           fi
 
           if [ "$update_code" != "404" ]; then
-            echo "::error::Packagist update failed (HTTP $update_code)"
+            echo "::error::Packagist update failed (HTTP $update_code)."
             cat /tmp/packagist.out; echo
             exit 1
           fi
@@ -1310,6 +1228,7 @@ jobs:
       DEPLOY_MIRROR: ${{ needs.resolve-config.outputs.deploy_mirror }}
       DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
       DEPLOY_METHOD: ${{ needs.resolve-config.outputs.deploy_method }}
+      APT_PACKAGES: ${{ needs.resolve-config.outputs.apt_packages }}
       BUILD_COMMAND: ${{ vars.BUILD_COMMAND }}
       BEFORE_DEPLOY_COMMAND: ${{ vars.BEFORE_DEPLOY_COMMAND }}
       AFTER_DEPLOY_COMMAND: ${{ vars.AFTER_DEPLOY_COMMAND }}
@@ -1341,29 +1260,7 @@ jobs:
       DEPLOY_LOCK_DIR: ${{ vars.DEPLOY_LOCK_DIR }}
 
     steps:
-      - name: Validate deploy mode
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "$SCOPE" = "selective" ] && [ "$DEPLOY_METHOD" = "git" ]; then
-            echo "::error::DEPLOY_METHOD=git is not supported in selective mode (workflow_dispatch with commits or DEPLOY_LAST_COMMITS=true). git deploys the whole branch, not a file subset."
-            exit 1
-          fi
-          case "$DEPLOY_MIRROR" in
-            false|true|full) ;;
-            *) echo "::error::Invalid DEPLOY_MIRROR='$DEPLOY_MIRROR'. Allowed: false | true | full."; exit 1 ;;
-          esac
-          if [ "$SCOPE" = "selective" ] && [ "$DEPLOY_MIRROR" = "full" ]; then
-            echo "::error::DEPLOY_MIRROR=full is incompatible with selective deploy (DEPLOY_LAST_COMMITS=true or workflow_dispatch with commits). 'full' means an exact mirror of the whole tree, while selective mode works with a subset of files. To delete files removed in the deployed commits, use DEPLOY_MIRROR=true."
-            exit 1
-          fi
-          if [ "$SCOPE" = "selective" ] && [ "$RUN_CI" = "true" ]; then
-            echo "::warning::SCOPE=selective — build results from job 'ci' are not deployed: the file list is built from git history, and built files are not in git. Deploying them requires SCOPE=full."
-          fi
-          echo "Resolved: method=$DEPLOY_METHOD scope=$SCOPE mirror=$DEPLOY_MIRROR commits='$COMMITS'"
-
-      - name: Collect vars & secrets
-        shell: bash
+      - name: Collect vars and secrets
         env:
           VARS_JSON: ${{ toJSON(vars) }}
           ALL_SECRETS: ${{ toJSON(secrets) }}
@@ -1417,12 +1314,64 @@ jobs:
 
           echo "CTX_ENV=$CTX" >> "$GITHUB_ENV"
 
-      - name: Setup SSH auth
-        if: ${{ env.DEPLOY_METHOD == 'rsync' || env.DEPLOY_METHOD == 'git' || env.DEPLOY_METHOD == 'command' }}
-        shell: bash
-        run: |
-          set -uo pipefail
+      - name: Cache system packages
+        id: cache-apt
+        if: ${{ env.APT_PACKAGES != '' }}
+        uses: actions/cache@v6
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-${{ env.APT_PACKAGES }}-v3
 
+      - name: Install system packages
+        if: ${{ env.APT_PACKAGES != '' }}
+        env:
+          CACHE_HIT: ${{ steps.cache-apt.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+
+          # >>> .github/snippets/apt-install.sh
+          read -r -a __pkgs <<< "${APT_PACKAGES:-}"
+
+          __missing=()
+          for __p in "${__pkgs[@]}"; do
+            command -v "$__p" >/dev/null 2>&1 || __missing+=("$__p")
+          done
+
+          if [ "${#__missing[@]}" -eq 0 ]; then
+            echo "System packages already present: ${__pkgs[*]:-<none>}"
+          else
+            # Keep downloaded .deb files so the apt cache step has something to save.
+            echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99keep-cache >/dev/null
+
+            __debs=()
+            for __p in "${__missing[@]}"; do
+              for __d in /var/cache/apt/archives/"${__p}"_*.deb; do
+                [ -f "$__d" ] && __debs+=("$__d")
+              done
+            done
+
+            if [ "${CACHE_HIT:-}" = "true" ] && [ "${#__debs[@]}" -ge "${#__missing[@]}" ]; then
+              echo "Installing from the apt cache: ${__missing[*]}"
+              sudo dpkg -i "${__debs[@]}" || sudo apt-get install -f -y --no-install-recommends
+            else
+              echo "Installing: ${__missing[*]}"
+              sudo apt-get update -q
+              sudo apt-get install -y --no-install-recommends "${__missing[@]}"
+            fi
+          fi
+
+          unset __pkgs __missing __p __debs __d
+          # <<< .github/snippets/apt-install.sh
+
+      - name: Set up SSH access
+        if: ${{ env.DEPLOY_METHOD != 'ftp' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # >>> .github/snippets/ssh-auth.sh
           TMP_KEY=$(mktemp)
           printf '%s\n' "$DEPLOY_KEY" > "$TMP_KEY"
           chmod 600 "$TMP_KEY"
@@ -1439,11 +1388,10 @@ jobs:
 
           if [ "$IS_PEM" = 0 ]; then
             if ! command -v sshpass >/dev/null 2>&1; then
-              sudo apt-get update -q
-              sudo apt-get install -y --no-install-recommends sshpass
+              echo "::error::DEPLOY_KEY is not a PEM private key, so it is used as a password, but sshpass is not installed (step 'Install system packages' should have done it)." >&2
+              exit 1
             fi
-            echo "ssh auth: probing password..."
-
+            echo "SSH auth: probing password..."
             if sshpass -f "$TMP_KEY" ssh \
                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                  -o NumberOfPasswordPrompts=1 "${SSH_COMMON[@]}" \
@@ -1454,7 +1402,7 @@ jobs:
           fi
 
           if [ -z "$GT_AUTH_MODE" ]; then
-            echo "ssh auth: probing private key..."
+            echo "SSH auth: probing private key..."
             if ssh -i "$TMP_KEY" \
                  -o PreferredAuthentications=publickey -o IdentitiesOnly=yes -o BatchMode=yes \
                  "${SSH_COMMON[@]}" \
@@ -1467,7 +1415,7 @@ jobs:
           if [ -z "$GT_AUTH_MODE" ]; then
             echo "::error::Cannot authenticate to $DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PORT — DEPLOY_KEY was tried both as a password and as a private key."
             for f in "$RUNNER_TEMP/ssh_probe_password.log" "$RUNNER_TEMP/ssh_probe_key.log"; do
-              [ -s "$f" ] && { echo "--- $(basename "$f") ---"; cat "$f"; }
+              if [ -s "$f" ]; then echo "=== $(basename "$f") ==="; cat "$f"; fi
             done
             exit 1
           fi
@@ -1489,17 +1437,10 @@ jobs:
 
           echo "GT_SSH=$GT_SSH" >> "$GITHUB_ENV"
           echo "GT_AUTH_MODE=$GT_AUTH_MODE" >> "$GITHUB_ENV"
-          echo "ssh auth: using $GT_AUTH_MODE"
+          echo "SSH auth: using $GT_AUTH_MODE"
+          # <<< .github/snippets/ssh-auth.sh
 
-      - name: Build remote prelude
-        if: ${{ env.DEPLOY_METHOD != 'ftp' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          set -euo pipefail
-
+          # Remote prelude: sourced by the remote scripts of before/after commands and git deploy.
           PRELUDE="$RUNNER_TEMP/remote_prelude.sh"
           : > "$PRELUDE"
           chmod 600 "$PRELUDE"
@@ -1552,12 +1493,12 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Resolve TARGET_COMMIT
+      - name: Resolve deploy files
         if: ${{ env.SCOPE == 'selective' }}
-        shell: bash
         run: |
           set -euo pipefail
 
+          # --- Target commit: the newest of COMMITS, checked out for the build ---
           if [ -z "$COMMITS" ]; then
             TARGET_COMMIT=$(git rev-parse HEAD)
             echo "No commits specified — TARGET_COMMIT = HEAD = $TARGET_COMMIT"
@@ -1579,7 +1520,7 @@ jobs:
             fi
 
             TARGET_COMMIT=$(git log --no-walk --format='%ct %H' "${COMMITS_ARR[@]}" | sort -k1 -nr | head -1 | awk '{print $2}')
-            echo "Resolved TARGET_COMMIT (latest by committer-date) = $TARGET_COMMIT"
+            echo "TARGET_COMMIT (latest by committer date) = $TARGET_COMMIT"
           fi
 
           echo "TARGET_COMMIT=$TARGET_COMMIT" >> "$GITHUB_ENV"
@@ -1590,7 +1531,70 @@ jobs:
             git checkout --force --detach "$TARGET_COMMIT"
           fi
 
-      - name: Download workspace from ci
+          # --- Upload / delete lists ---
+          UPLOAD_FILE="$RUNNER_TEMP/files_upload.txt"
+          DELETE_FILE="$RUNNER_TEMP/files_delete.txt"
+          ALL_FILES="$RUNNER_TEMP/all_files.txt"
+          : > "$UPLOAD_FILE"
+          : > "$DELETE_FILE"
+          : > "$ALL_FILES"
+
+          LOCAL_DIR="${DEPLOY_LOCAL_DIR%/}"
+          LOCAL_DIR="${LOCAL_DIR#./}"
+          [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
+
+          if [ -z "$COMMITS" ]; then
+            echo "=== No commits: collecting all paths ever touched in history ==="
+            git log --pretty=format: --name-only | grep -v '^$' | sort -u > "$ALL_FILES" || true
+          else
+            for commit in "${COMMITS_ARR[@]}"; do
+              commit="${commit// /}"
+              [ -z "$commit" ] && continue
+              echo "=== Commit $commit ==="
+              git diff-tree --no-commit-id -r --name-only "$commit" >> "$ALL_FILES"
+            done
+            sort -u -o "$ALL_FILES" "$ALL_FILES"
+          fi
+
+          echo "Candidate files: $(wc -l < "$ALL_FILES")"
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            if [ -n "$LOCAL_DIR" ]; then
+              [[ "$file" == "$LOCAL_DIR/"* ]] || continue
+              rel="${file#"$LOCAL_DIR/"}"
+            else
+              rel="$file"
+            fi
+
+            if git cat-file -e "$TARGET_COMMIT:$file" 2>/dev/null; then
+              echo "$rel" >> "$UPLOAD_FILE"
+            else
+              if [ "${DEPLOY_MIRROR}" = "true" ] || [ "${DEPLOY_MIRROR}" = "full" ]; then
+                echo "$rel" >> "$DELETE_FILE"
+              fi
+            fi
+          done < "$ALL_FILES"
+
+          # Never ship git metadata; with a mirror, .gitignore & co. are regular files.
+          if [ "$DEPLOY_MIRROR" = "false" ]; then
+            PAT='^\.git'
+          else
+            PAT='^\.git(/|$)|^\.github(/|$)'
+          fi
+          for f in "$UPLOAD_FILE" "$DELETE_FILE"; do
+            { grep -vE "$PAT" "$f" || true; } | sort -u > "$f.tmp"
+            mv "$f.tmp" "$f"
+          done
+
+          if ! [ -s "$UPLOAD_FILE" ] && ! [ -s "$DELETE_FILE" ]; then
+            echo "::warning::No files match DEPLOY_LOCAL_DIR='${DEPLOY_LOCAL_DIR}'."
+          fi
+
+          echo "Files to upload: $(wc -l < "$UPLOAD_FILE")"
+          echo "Files to delete: $(wc -l < "$DELETE_FILE")"
+
+      - name: Download workspace
         id: workspace
         if: ${{ env.SCOPE == 'full' && env.RUN_CI == 'true' }}
         uses: actions/download-artifact@v8
@@ -1599,9 +1603,8 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/workspace
 
-      - name: Unpack workspace from ci
+      - name: Unpack workspace
         if: ${{ steps.workspace.outcome == 'success' }}
-        shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -1616,14 +1619,13 @@ jobs:
           done
           rm -rf "$RUNNER_TEMP/workspace"
 
-      - name: Resolve toolchain
-        id: tc
-        if: ${{ env.SCOPE == 'selective' && env.BUILD_COMMAND != '' }}
-        shell: bash
+      - name: Install toolchain
+        if: ${{ env.SCOPE == 'selective' && env.BUILD_COMMAND != '' && vars.TOOLCHAIN != '' }}
         env:
           TOOLCHAIN: ${{ vars.TOOLCHAIN }}
         run: |
           set -euo pipefail
+
           backends="ubi,aqua,asdf,cargo,go,npm,pipx,gem,dotnet,spm,vfox,http"
           tools=""
           while IFS= read -r item; do
@@ -1649,15 +1651,7 @@ jobs:
           done <<< "$(printf '%s' "${TOOLCHAIN:-}" | tr ',' '\n')"
           tools="${tools# }"
           echo "Tools: ${tools:-<none>}"
-          echo "tools=$tools" >> "$GITHUB_OUTPUT"
-
-      - name: Install toolchain
-        if: ${{ steps.tc.outputs.tools != '' }}
-        shell: bash
-        env:
-          TOOLS: ${{ steps.tc.outputs.tools }}
-        run: |
-          set -euo pipefail
+          if [ -z "$tools" ]; then exit 0; fi
 
           MISE_FALLBACK_VERSION="v2026.7.12"
           bin_dir="$RUNNER_TEMP/mise-bin"
@@ -1695,7 +1689,7 @@ jobs:
           fi
 
           export MISE_YES=1 MISE_PYTHON_COMPILE=false
-          "$mise" use --global $TOOLS
+          "$mise" use --global $tools
           "$mise" ls --installed
           {
             "$mise" bin-paths 2>/dev/null || true
@@ -1704,7 +1698,6 @@ jobs:
 
       - name: Build
         if: ${{ env.SCOPE == 'selective' && env.BUILD_COMMAND != '' }}
-        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -1715,113 +1708,8 @@ jobs:
 
           eval "${BUILD_COMMAND//$'\r'/}"
 
-      - name: Cache lftp
-        if: ${{ env.DEPLOY_METHOD == 'ftp' }}
-        id: cache-lftp
-        uses: actions/cache@v6
-        with:
-          path: /var/cache/apt/archives
-          key: ${{ runner.os }}-apt-lftp-v2
-
-      - name: Keep apt packages for caching
-        if: ${{ env.DEPLOY_METHOD == 'ftp' }}
-        shell: bash
-        run: echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99keep-cache >/dev/null
-
-      - name: Install lftp
-        if: ${{ env.DEPLOY_METHOD == 'ftp' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.cache-lftp.outputs.cache-hit }}" = "true" ] && ls /var/cache/apt/archives/lftp_*.deb &>/dev/null; then
-            sudo dpkg -i /var/cache/apt/archives/lftp_*.deb || sudo apt-get install -f -y --no-install-recommends
-          else
-            sudo apt-get update -q
-            sudo apt-get install -y --no-install-recommends lftp
-          fi
-
-      - name: Resolve changed files
-        if: ${{ env.SCOPE == 'selective' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          UPLOAD_FILE="$RUNNER_TEMP/files_upload.txt"
-          DELETE_FILE="$RUNNER_TEMP/files_delete.txt"
-          ALL_FILES="$RUNNER_TEMP/all_files.txt"
-          > "$UPLOAD_FILE"
-          > "$DELETE_FILE"
-          > "$ALL_FILES"
-
-          LOCAL_DIR="${DEPLOY_LOCAL_DIR%/}"
-          LOCAL_DIR="${LOCAL_DIR#./}"
-          [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
-
-          if [ -z "$COMMITS" ]; then
-            echo "=== Full deploy mode: collecting all paths ever touched in history ==="
-            git log --pretty=format: --name-only | grep -v '^$' | sort -u > "$ALL_FILES" || true
-          else
-            readarray -t COMMITS_ARR < <(echo "$COMMITS" | tr ',; \t\r\n' '\n' | tr -s '\n' | grep -v '^[[:space:]]*$')
-            for commit in "${COMMITS_ARR[@]}"; do
-              commit="${commit// /}"
-              [ -z "$commit" ] && continue
-              echo "=== Processing commit: $commit ==="
-              git diff-tree --no-commit-id -r --name-only "$commit" >> "$ALL_FILES"
-            done
-            sort -u -o "$ALL_FILES" "$ALL_FILES"
-          fi
-
-          echo "=== Candidate files: $(wc -l < "$ALL_FILES") ==="
-
-          while IFS= read -r file; do
-            [ -z "$file" ] && continue
-            if [ -n "$LOCAL_DIR" ]; then
-              [[ "$file" == "$LOCAL_DIR/"* ]] || continue
-              rel="${file#"$LOCAL_DIR/"}"
-            else
-              rel="$file"
-            fi
-
-            if git cat-file -e "$TARGET_COMMIT:$file" 2>/dev/null; then
-              echo "$rel" >> "$UPLOAD_FILE"
-            else
-              if [ "${DEPLOY_MIRROR}" = "true" ] || [ "${DEPLOY_MIRROR}" = "full" ]; then
-                echo "$rel" >> "$DELETE_FILE"
-              fi
-            fi
-          done < "$ALL_FILES"
-
-          sort -u -o "$UPLOAD_FILE" "$UPLOAD_FILE"
-          sort -u -o "$DELETE_FILE" "$DELETE_FILE"
-
-          if ! [ -s "$UPLOAD_FILE" ] && ! [ -s "$DELETE_FILE" ]; then
-            echo "::warning::No files match DEPLOY_LOCAL_DIR='${DEPLOY_LOCAL_DIR}'"
-          fi
-
-      - name: Strip .git* from deploy lists
-        if: ${{ env.SCOPE == 'selective' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ "$DEPLOY_MIRROR" = "false" ]; then
-            PAT='^\.git'
-          else
-            PAT='^\.git(/|$)|^\.github(/|$)'
-          fi
-
-          for f in "$RUNNER_TEMP/files_upload.txt" "$RUNNER_TEMP/files_delete.txt"; do
-            [ -s "$f" ] || continue
-            grep -vE "$PAT" "$f" > "$f.tmp" || true
-            mv "$f.tmp" "$f"
-          done
-
-          echo "--- Files to upload: $(wc -l < "$RUNNER_TEMP/files_upload.txt") ---"
-          echo "--- Files to delete: $(wc -l < "$RUNNER_TEMP/files_delete.txt") ---"
-
       - name: Acquire deploy lock
         id: deploy-lock
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -2346,7 +2234,6 @@ jobs:
         id: before-deploy
         if: ${{ env.BEFORE_DEPLOY_COMMAND != '' && env.DEPLOY_METHOD != 'ftp' && env.DEPLOY_SUPERSEDED != 'true' }}
         timeout-minutes: 60
-        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -2370,119 +2257,10 @@ jobs:
 
           "$GT_SSH" "$DEPLOY_USER@$DEPLOY_HOST" bash -s < "$S"
 
-      - name: FTP deploy (full mirror)
-        id: ftp-full
-        if: ${{ env.DEPLOY_METHOD == 'ftp' && env.SCOPE == 'full' && env.DEPLOY_SUPERSEDED != 'true' }}
+      - name: Deploy via FTP
+        id: deploy-ftp
+        if: ${{ env.DEPLOY_METHOD == 'ftp' && env.DEPLOY_SUPERSEDED != 'true' }}
         timeout-minutes: 60
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          DELETE=""
-          if [ "${DEPLOY_MIRROR}" = "full" ]; then
-            DELETE="--delete"
-          fi
-
-          FAILED_FILE="$RUNNER_TEMP/ftp_failed.txt"
-          : > "$FAILED_FILE"
-
-          run_lftp_session() {
-            local cmd_file="$1" max_retries="$2"
-            {
-              printf '%s\n' \
-                "set net:timeout 30" \
-                "set net:max-retries $max_retries" \
-                "set net:reconnect-interval-base 5" \
-                "set ftp:passive-mode true" \
-                "set ssl:verify-certificate no" \
-                "set ftp:list-options -a" \
-                "set cmd:fail-exit true"
-              cat "$cmd_file"
-              echo "quit"
-            } | lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST"
-          }
-
-          run_lftp_single() {
-            local cmd_file="$1" label="$2"
-            local success=false
-            for attempt in 1 2 3; do
-              if run_lftp_session "$cmd_file" 1; then
-                success=true
-                break
-              else
-                echo "::warning::Per-file attempt $attempt/3 failed for '$label'"
-              fi
-            done
-            if [ "$success" = "false" ]; then
-              echo "::warning::Skipping '$label' after 3 failed attempts"
-              printf '%s\n' "$label" >> "$FAILED_FILE"
-            fi
-          }
-
-          BATCH_CMD_FILE="$RUNNER_TEMP/lftp_batch_cmds.txt"
-          BATCH_LOG="$RUNNER_TEMP/lftp_batch.log"
-
-          if [ "$DEPLOY_MIRROR" = "false" ]; then
-            GIT_EX="--exclude-glob '.git*'"
-          else
-            GIT_EX="--exclude-glob '.git' --exclude-glob '.github'"
-          fi
-
-          printf '%s\n' "mirror -R --no-perms --parallel=2 --verbose $GIT_EX $DELETE \"$DEPLOY_LOCAL_DIR\" \"$DEPLOY_PATH\"" > "$BATCH_CMD_FILE"
-
-          echo "Attempting batch mirror..."
-          batch_ok=false
-          for attempt in 1 2 3; do
-            if run_lftp_session "$BATCH_CMD_FILE" 5 >"$BATCH_LOG" 2>&1; then
-              cat "$BATCH_LOG"
-              echo "Batch mirror succeeded on attempt $attempt"
-              batch_ok=true
-              break
-            else
-              echo "::warning::Batch mirror attempt $attempt/3 failed. lftp output:"
-              cat "$BATCH_LOG"
-            fi
-          done
-
-          if [ "$batch_ok" = "false" ]; then
-            echo "Falling back to per-file upload..."
-            LOCAL_DIR="${DEPLOY_LOCAL_DIR%/}"
-            LOCAL_DIR="${LOCAL_DIR#./}"
-            [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
-            SRC_BASE="${LOCAL_DIR:-.}"
-
-            SINGLE_CMD_FILE="$RUNNER_TEMP/lftp_single_cmd.txt"
-            while IFS= read -r local_path; do
-              rel_path="${local_path#./}"
-              [ -n "$LOCAL_DIR" ] && rel_path="${rel_path#"$LOCAL_DIR/"}"
-              file_dir=$(dirname "$rel_path")
-              if [ "$file_dir" = "." ]; then
-                remote_dir="$DEPLOY_PATH"
-              else
-                remote_dir="$DEPLOY_PATH/$file_dir"
-              fi
-              printf '%s\n' "mkdir -fp \"$remote_dir\"" "put -O \"$remote_dir\" \"$local_path\"" > "$SINGLE_CMD_FILE"
-              run_lftp_single "$SINGLE_CMD_FILE" "$rel_path"
-            done < <(
-              if [ "$DEPLOY_MIRROR" = "false" ]; then
-                find "$SRC_BASE" \( -name '.git' -o -name '.github' -o -name '.gitignore' -o -name '.gitattributes' -o -name '.gitmodules' \) -prune -o -type f -print
-              else
-                find "$SRC_BASE" \( -name '.git' -o -name '.github' \) -prune -o -type f -print
-              fi
-            )
-          fi
-
-          if [ -s "$FAILED_FILE" ]; then
-            echo "::error::FTP deploy is incomplete: $(wc -l < "$FAILED_FILE" | tr -d ' ') file(s) failed after all retries:"
-            sed 's/^/  /' "$FAILED_FILE"
-            exit 1
-          fi
-
-      - name: FTP deploy (selective)
-        id: ftp-selective
-        if: ${{ env.DEPLOY_METHOD == 'ftp' && env.SCOPE == 'selective' && env.DEPLOY_SUPERSEDED != 'true' }}
-        timeout-minutes: 60
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -2491,6 +2269,9 @@ jobs:
           [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
 
           FAILED_FILE="$RUNNER_TEMP/ftp_failed.txt"
+          BATCH_CMD_FILE="$RUNNER_TEMP/lftp_batch_cmds.txt"
+          BATCH_LOG="$RUNNER_TEMP/lftp_batch.log"
+          SINGLE_CMD_FILE="$RUNNER_TEMP/lftp_single_cmd.txt"
           : > "$FAILED_FILE"
 
           run_lftp_session() {
@@ -2509,219 +2290,189 @@ jobs:
             } | lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST"
           }
 
-          run_lftp_single() {
-            local cmd_file="$1" label="$2"
-            local success=false
-            for attempt in 1 2 3; do
-              if run_lftp_session "$cmd_file" 1; then
-                success=true
-                break
-              else
-                echo "::warning::Per-file attempt $attempt/3 failed for '$label'"
-              fi
-            done
-            if [ "$success" = "false" ]; then
-              echo "::warning::Skipping '$label' after 3 failed attempts"
-              printf '%s\n' "$label" >> "$FAILED_FILE"
-            fi
-          }
-
-          BATCH_CMD_FILE="$RUNNER_TEMP/lftp_batch_cmds.txt"
-          BATCH_LOG="$RUNNER_TEMP/lftp_batch.log"
-
-          UPLOAD_FILE="$RUNNER_TEMP/files_upload.txt"
-          DELETE_FILE="$RUNNER_TEMP/files_delete.txt"
-
-          if [ -s "$UPLOAD_FILE" ]; then
-            > "$BATCH_CMD_FILE"
-            while IFS= read -r file; do
-              [ -z "$file" ] && continue
-              if [ -z "$LOCAL_DIR" ]; then
-                src_path="./$file"
-              else
-                src_path="./$LOCAL_DIR/$file"
-              fi
-              file_dir=$(dirname "$file")
-              if [ "$file_dir" = "." ]; then
-                remote_dir="$DEPLOY_PATH"
-              else
-                remote_dir="$DEPLOY_PATH/$file_dir"
-              fi
-              echo "mkdir -fp \"$remote_dir\"" >> "$BATCH_CMD_FILE"
-              echo "put -O \"$remote_dir\" \"$src_path\"" >> "$BATCH_CMD_FILE"
-            done < "$UPLOAD_FILE"
-
-            echo "Attempting batch upload..."
-            batch_ok=false
+          # Runs BATCH_CMD_FILE up to 3 times; fails only when every attempt failed.
+          run_lftp_batch() {
+            local what="$1" attempt
+            echo "Attempting batch $what..."
             for attempt in 1 2 3; do
               if run_lftp_session "$BATCH_CMD_FILE" 5 >"$BATCH_LOG" 2>&1; then
                 cat "$BATCH_LOG"
-                echo "Batch upload succeeded on attempt $attempt"
-                batch_ok=true
-                break
-              else
-                echo "::warning::Batch upload attempt $attempt/3 failed. lftp output:"
-                cat "$BATCH_LOG"
+                echo "Batch $what succeeded on attempt $attempt"
+                return 0
               fi
+              echo "::warning::Batch $what attempt $attempt/3 failed. lftp output:"
+              cat "$BATCH_LOG"
             done
+            return 1
+          }
 
-            if [ "$batch_ok" = "false" ]; then
+          # Fallback: one lftp session per file, 3 attempts each; failures are collected, not fatal.
+          run_lftp_single() {
+            local label="$1" attempt
+            for attempt in 1 2 3; do
+              if run_lftp_session "$SINGLE_CMD_FILE" 1; then return 0; fi
+              echo "::warning::Per-file attempt $attempt/3 failed for '$label'"
+            done
+            echo "::warning::Skipping '$label' after 3 failed attempts"
+            printf '%s\n' "$label" >> "$FAILED_FILE"
+          }
+
+          remote_dir_of() {
+            local d
+            d="$(dirname "$1")"
+            if [ "$d" = "." ]; then printf '%s' "$DEPLOY_PATH"; else printf '%s/%s' "$DEPLOY_PATH" "$d"; fi
+          }
+
+          source_of() {
+            if [ -z "$LOCAL_DIR" ]; then printf './%s' "$1"; else printf './%s/%s' "$LOCAL_DIR" "$1"; fi
+          }
+
+          if [ "$SCOPE" = "full" ]; then
+            DELETE=""
+            if [ "$DEPLOY_MIRROR" = "full" ]; then DELETE="--delete"; fi
+            if [ "$DEPLOY_MIRROR" = "false" ]; then
+              GIT_EX="--exclude-glob '.git*'"
+            else
+              GIT_EX="--exclude-glob '.git' --exclude-glob '.github'"
+            fi
+
+            printf '%s\n' "mirror -R --no-perms --parallel=2 --verbose $GIT_EX $DELETE \"$DEPLOY_LOCAL_DIR\" \"$DEPLOY_PATH\"" > "$BATCH_CMD_FILE"
+
+            if ! run_lftp_batch mirror; then
               echo "Falling back to per-file upload..."
+              SRC_BASE="${LOCAL_DIR:-.}"
+              while IFS= read -r local_path; do
+                rel_path="${local_path#./}"
+                [ -n "$LOCAL_DIR" ] && rel_path="${rel_path#"$LOCAL_DIR/"}"
+                remote_dir="$(remote_dir_of "$rel_path")"
+                printf '%s\n' "mkdir -fp \"$remote_dir\"" "put -O \"$remote_dir\" \"$local_path\"" > "$SINGLE_CMD_FILE"
+                run_lftp_single "$rel_path"
+              done < <(
+                if [ "$DEPLOY_MIRROR" = "false" ]; then
+                  find "$SRC_BASE" \( -name '.git' -o -name '.github' -o -name '.gitignore' -o -name '.gitattributes' -o -name '.gitmodules' \) -prune -o -type f -print
+                else
+                  find "$SRC_BASE" \( -name '.git' -o -name '.github' \) -prune -o -type f -print
+                fi
+              )
+            fi
+
+          else
+            UPLOAD_FILE="$RUNNER_TEMP/files_upload.txt"
+            DELETE_FILE="$RUNNER_TEMP/files_delete.txt"
+
+            if [ -s "$UPLOAD_FILE" ]; then
+              : > "$BATCH_CMD_FILE"
               while IFS= read -r file; do
                 [ -z "$file" ] && continue
-                if [ -z "$LOCAL_DIR" ]; then
-                  src_path="./$file"
-                else
-                  src_path="./$LOCAL_DIR/$file"
-                fi
-                file_dir=$(dirname "$file")
-                if [ "$file_dir" = "." ]; then
-                  remote_dir="$DEPLOY_PATH"
-                else
-                  remote_dir="$DEPLOY_PATH/$file_dir"
-                fi
-                SINGLE_CMD_FILE="$RUNNER_TEMP/lftp_single_cmd.txt"
-                printf '%s\n' "mkdir -fp \"$remote_dir\"" "put -O \"$remote_dir\" \"$src_path\"" > "$SINGLE_CMD_FILE"
-                run_lftp_single "$SINGLE_CMD_FILE" "$file"
+                remote_dir="$(remote_dir_of "$file")"
+                printf '%s\n' "mkdir -fp \"$remote_dir\"" "put -O \"$remote_dir\" \"$(source_of "$file")\"" >> "$BATCH_CMD_FILE"
               done < "$UPLOAD_FILE"
+
+              if ! run_lftp_batch upload; then
+                echo "Falling back to per-file upload..."
+                while IFS= read -r file; do
+                  [ -z "$file" ] && continue
+                  remote_dir="$(remote_dir_of "$file")"
+                  printf '%s\n' "mkdir -fp \"$remote_dir\"" "put -O \"$remote_dir\" \"$(source_of "$file")\"" > "$SINGLE_CMD_FILE"
+                  run_lftp_single "$file"
+                done < "$UPLOAD_FILE"
+              fi
+            fi
+
+            if [ -s "$DELETE_FILE" ]; then
+              : > "$BATCH_CMD_FILE"
+              while IFS= read -r file; do
+                [ -z "$file" ] && continue
+                printf '%s\n' "rm -f \"$DEPLOY_PATH/$file\"" >> "$BATCH_CMD_FILE"
+              done < "$DELETE_FILE"
+
+              if ! run_lftp_batch delete; then
+                echo "Falling back to per-file delete..."
+                while IFS= read -r file; do
+                  [ -z "$file" ] && continue
+                  printf '%s\n' "rm -f \"$DEPLOY_PATH/$file\"" > "$SINGLE_CMD_FILE"
+                  run_lftp_single "$file"
+                done < "$DELETE_FILE"
+              fi
             fi
           fi
 
-          if [ -s "$DELETE_FILE" ]; then
-            > "$BATCH_CMD_FILE"
-            while IFS= read -r file; do
-              [ -z "$file" ] && continue
-              echo "rm -f \"$DEPLOY_PATH/$file\"" >> "$BATCH_CMD_FILE"
-            done < "$DELETE_FILE"
+          if [ -s "$FAILED_FILE" ]; then
+            echo "::error::FTP deploy is incomplete: $(wc -l < "$FAILED_FILE" | tr -d ' ') file(s) failed after all retries:"
+            sed 's/^/  /' "$FAILED_FILE"
+            exit 1
+          fi
 
-            echo "Attempting batch delete..."
-            batch_ok=false
+      - name: Deploy via rsync
+        id: deploy-rsync
+        if: ${{ env.DEPLOY_METHOD == 'rsync' && env.DEPLOY_SUPERSEDED != 'true' }}
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+
+          attempt_rsync() {
+            local rc attempt
             for attempt in 1 2 3; do
-              if run_lftp_session "$BATCH_CMD_FILE" 5 >"$BATCH_LOG" 2>&1; then
-                cat "$BATCH_LOG"
-                echo "Batch delete succeeded on attempt $attempt"
-                batch_ok=true
-                break
-              else
-                echo "::warning::Batch delete attempt $attempt/3 failed. lftp output:"
-                cat "$BATCH_LOG"
-              fi
+              if rsync "$@"; then return 0; fi
+              rc=$?
+              echo "::warning::rsync attempt $attempt/3 failed (exit $rc); retrying in 5s..."
+              sleep 5
             done
+            echo "::error::rsync failed after 3 attempts (last exit $rc)."
+            return 1
+          }
 
-            if [ "$batch_ok" = "false" ]; then
-              echo "Falling back to per-file delete..."
+          if [ "$SCOPE" = "full" ]; then
+            DELETE=""
+            if [ "$DEPLOY_MIRROR" = "full" ]; then DELETE="--delete"; fi
+            if [ "$DEPLOY_MIRROR" = "false" ]; then
+              GIT_EX=(--exclude='/.git*')
+            else
+              GIT_EX=(--exclude='/.git' --exclude='/.github')
+            fi
+
+            attempt_rsync -avz --progress --timeout=30 $DELETE \
+              -e "$GT_SSH" \
+              "${GIT_EX[@]}" \
+              --no-perms --no-owner --no-group \
+              --omit-dir-times \
+              --keep-dirlinks \
+              "$DEPLOY_LOCAL_DIR/" "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH"
+
+          else
+            LOCAL_DIR="${DEPLOY_LOCAL_DIR%/}"
+            LOCAL_DIR="${LOCAL_DIR#./}"
+            [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
+            if [ -z "$LOCAL_DIR" ]; then SRC_DIR="./"; else SRC_DIR="$LOCAL_DIR/"; fi
+
+            UPLOAD_FILE="$RUNNER_TEMP/files_upload.txt"
+            DELETE_FILE="$RUNNER_TEMP/files_delete.txt"
+
+            if [ -s "$UPLOAD_FILE" ]; then
+              attempt_rsync -avz --progress --timeout=30 \
+                -e "$GT_SSH" \
+                --files-from="$UPLOAD_FILE" \
+                --ignore-missing-args \
+                --no-perms --no-owner --no-group \
+                --omit-dir-times \
+                --keep-dirlinks \
+                "$SRC_DIR" "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH"
+            else
+              echo "No files to upload."
+            fi
+
+            if { [ "$DEPLOY_MIRROR" = "true" ] || [ "$DEPLOY_MIRROR" = "full" ]; } && [ -s "$DELETE_FILE" ]; then
               while IFS= read -r file; do
                 [ -z "$file" ] && continue
-                SINGLE_CMD_FILE="$RUNNER_TEMP/lftp_single_cmd.txt"
-                printf '%s\n' "rm -f \"$DEPLOY_PATH/$file\"" > "$SINGLE_CMD_FILE"
-                run_lftp_single "$SINGLE_CMD_FILE" "$file"
+                "$GT_SSH" -n "$DEPLOY_USER@$DEPLOY_HOST" "rm -f \"$DEPLOY_PATH/$file\""
               done < "$DELETE_FILE"
             fi
           fi
 
-          if [ -s "$FAILED_FILE" ]; then
-            echo "::error::FTP deploy is incomplete: $(wc -l < "$FAILED_FILE" | tr -d ' ') file(s) failed after all retries:"
-            sed 's/^/  /' "$FAILED_FILE"
-            exit 1
-          fi
-
-      - name: RSYNC deploy (full)
-        id: rsync-full
-        if: ${{ env.DEPLOY_METHOD == 'rsync' && env.SCOPE == 'full' && env.DEPLOY_SUPERSEDED != 'true' }}
-        timeout-minutes: 60
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          DELETE=""
-          if [ "${DEPLOY_MIRROR}" = "full" ]; then
-            DELETE="--delete"
-          fi
-
-          attempt_rsync() {
-            local rc
-            for attempt in 1 2 3; do
-              if rsync "$@"; then return 0; fi
-              rc=$?
-              echo "::warning::rsync attempt $attempt/3 failed (exit $rc); retrying in 5s..."
-              sleep 5
-            done
-            echo "::error::rsync failed after 3 attempts (last exit $rc)"
-            return 1
-          }
-
-          if [ "$DEPLOY_MIRROR" = "false" ]; then
-            GIT_EX=(--exclude='/.git*')
-          else
-            GIT_EX=(--exclude='/.git' --exclude='/.github')
-          fi
-
-          attempt_rsync -avz --progress --timeout=30 $DELETE \
-            -e "$GT_SSH" \
-            "${GIT_EX[@]}" \
-            --no-perms --no-owner --no-group \
-            --omit-dir-times \
-            --keep-dirlinks \
-            "$DEPLOY_LOCAL_DIR/" "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH"
-
-      - name: RSYNC deploy (selective)
-        id: rsync-selective
-        if: ${{ env.DEPLOY_METHOD == 'rsync' && env.SCOPE == 'selective' && env.DEPLOY_SUPERSEDED != 'true' }}
-        timeout-minutes: 60
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          LOCAL_DIR="${DEPLOY_LOCAL_DIR%/}"
-          LOCAL_DIR="${LOCAL_DIR#./}"
-          [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
-
-          UPLOAD_FILE="$RUNNER_TEMP/files_upload.txt"
-          DELETE_FILE="$RUNNER_TEMP/files_delete.txt"
-
-          if [ -z "$LOCAL_DIR" ]; then
-            SRC_DIR="./"
-          else
-            SRC_DIR="$LOCAL_DIR/"
-          fi
-
-          attempt_rsync() {
-            local rc
-            for attempt in 1 2 3; do
-              if rsync "$@"; then return 0; fi
-              rc=$?
-              echo "::warning::rsync attempt $attempt/3 failed (exit $rc); retrying in 5s..."
-              sleep 5
-            done
-            echo "::error::rsync failed after 3 attempts (last exit $rc)"
-            return 1
-          }
-
-          if [ -s "$UPLOAD_FILE" ]; then
-            attempt_rsync -avz --progress --timeout=30 \
-              -e "$GT_SSH" \
-              --files-from="$UPLOAD_FILE" \
-              --ignore-missing-args \
-              --no-perms --no-owner --no-group \
-              --omit-dir-times \
-              --keep-dirlinks \
-              "$SRC_DIR" "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH"
-          else
-            echo "No files to upload."
-          fi
-
-          if { [ "${DEPLOY_MIRROR}" = "true" ] || [ "${DEPLOY_MIRROR}" = "full" ]; } && [ -s "$DELETE_FILE" ]; then
-            while IFS= read -r file; do
-              [ -z "$file" ] && continue
-              "$GT_SSH" -n "$DEPLOY_USER@$DEPLOY_HOST" "rm -f \"$DEPLOY_PATH/$file\""
-            done < "$DELETE_FILE"
-          fi
-
-      - name: GIT deploy
-        id: git-deploy
+      - name: Deploy via git
+        id: deploy-git
         if: ${{ env.DEPLOY_METHOD == 'git' && env.DEPLOY_SUPERSEDED != 'true' }}
         timeout-minutes: 60
-        shell: bash
         env:
           REPO: ${{ github.repository }}
         run: |
@@ -2805,7 +2556,6 @@ jobs:
         id: after-deploy
         if: ${{ env.AFTER_DEPLOY_COMMAND != '' && env.DEPLOY_METHOD != 'ftp' && env.DEPLOY_SUPERSEDED != 'true' }}
         timeout-minutes: 60
-        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -2831,7 +2581,6 @@ jobs:
 
       - name: Release deploy lock
         if: ${{ env.DEPLOY_SUPERSEDED != 'true' }}
-        shell: bash
         run: |
           set -euo pipefail
           # shellcheck source=/dev/null
@@ -2841,9 +2590,8 @@ jobs:
           lk_release_all
           echo "LK_TOKEN=" >> "$GITHUB_ENV"
 
-      - name: Cleanup
+      - name: Clean up
         if: always()
-        shell: bash
         run: |
           set +e
 
@@ -2854,7 +2602,7 @@ jobs:
             lk_mark_state failed running
             lk_release_all
             if [ -s "$RUNNER_TEMP/deploy_lock_heartbeat.log" ]; then
-              echo "--- deploy lock heartbeat ---"
+              echo "=== Deploy lock heartbeat ==="
               cat "$RUNNER_TEMP/deploy_lock_heartbeat.log"
             fi
             rm -f "$LK_LIB" "$RUNNER_TEMP/deploy_lock_heartbeat.log" "$RUNNER_TEMP/ftp_failed.txt"

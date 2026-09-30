@@ -56,35 +56,30 @@ expect_err() {
   else fail "$name" "ожидалась ошибка со словами «$want»" "получено: $LAST_LOG"; fi
 }
 
-base="export REF_TYPE=branch REF_NAME=main REF_BRANCH=main REF_COMMIT=$SHA_MAIN REF_TAG_BRANCH= MULTIPLE_PACKAGES= INPUT_ENVIRONMENT="
+base="export REF_TYPE=branch REF_NAME=main REF_BRANCH=main REF_COMMIT=$SHA_MAIN REF_TAG_BRANCH= MULTIPLE_PACKAGES="
 
 expect_ok "ветка проходит насквозь" "$base" ref_branch main
 expect_ok "environment совпадает с ref_branch" "$base" environment main
 expect_ok "без multi суффикса пакета нет" "$base" pkg_suffix ""
 
 expect_ok "multi даёт суффикс пакета" \
-  "export REF_TYPE=branch REF_NAME=release/1.x REF_BRANCH=release-1.x REF_COMMIT=$SHA_REL REF_TAG_BRANCH= MULTIPLE_PACKAGES=true INPUT_ENVIRONMENT=" \
+  "export REF_TYPE=branch REF_NAME=release/1.x REF_BRANCH=release-1.x REF_COMMIT=$SHA_REL REF_TAG_BRANCH= MULTIPLE_PACKAGES=true" \
   pkg_suffix "-release-1.x"
 
-expect_ok "ручной override окружения" \
-  "$base INPUT_ENVIRONMENT=staging" ref_branch staging
-expect_ok "override со слешем нормализуется" \
-  "$base INPUT_ENVIRONMENT=release/2.x" ref_branch release-2.x
-
 expect_ok "ветка плоского тега берётся из истории" \
-  "export REF_TYPE=tag REF_NAME=v1.2.3 REF_BRANCH= REF_COMMIT=$SHA_REL REF_TAG_BRANCH= MULTIPLE_PACKAGES= INPUT_ENVIRONMENT=" \
+  "export REF_TYPE=tag REF_NAME=v1.2.3 REF_BRANCH= REF_COMMIT=$SHA_REL REF_TAG_BRANCH= MULTIPLE_PACKAGES=" \
   ref_branch release-1.x
 
 expect_err "коммит вне веток — честная ошибка, а не пустое окружение" \
-  "export REF_TYPE=tag REF_NAME=v9.9.9 REF_BRANCH= REF_COMMIT=$SHA_ORPHAN REF_TAG_BRANCH= MULTIPLE_PACKAGES= INPUT_ENVIRONMENT=" \
+  "export REF_TYPE=tag REF_NAME=v9.9.9 REF_BRANCH= REF_COMMIT=$SHA_ORPHAN REF_TAG_BRANCH= MULTIPLE_PACKAGES=" \
   "Cannot tell which branch"
 
 expect_ok "ветка из префикса тега проверяется и принимается" \
-  "export REF_TYPE=tag REF_NAME=release/1.x/v1.2.3 REF_BRANCH=release-1.x REF_COMMIT=$SHA_REL REF_TAG_BRANCH=release/1.x MULTIPLE_PACKAGES=true INPUT_ENVIRONMENT=" \
+  "export REF_TYPE=tag REF_NAME=release/1.x/v1.2.3 REF_BRANCH=release-1.x REF_COMMIT=$SHA_REL REF_TAG_BRANCH=release/1.x MULTIPLE_PACKAGES=true" \
   ref_branch release-1.x
 
 expect_err "опечатка в ветке тега ловится здесь, а не на деплое" \
-  "export REF_TYPE=tag REF_NAME=nosuch/v1.2.3 REF_BRANCH=nosuch REF_COMMIT=$SHA_MAIN REF_TAG_BRANCH=nosuch MULTIPLE_PACKAGES=true INPUT_ENVIRONMENT=" \
+  "export REF_TYPE=tag REF_NAME=nosuch/v1.2.3 REF_BRANCH=nosuch REF_COMMIT=$SHA_MAIN REF_TAG_BRANCH=nosuch MULTIPLE_PACKAGES=true" \
   "not found"
 
 suite_result "resolve-env"

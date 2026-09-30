@@ -224,21 +224,21 @@ check_eq "общий: ложных снятий нет" 0 "$(cat "$W"/mq[1-6].lo
 echo "-- ftp deploy steps --"
 
 run_ftp_step() {
-  local id="$1" scope_dir="$W/step-$1"
+  local scope="$1" scope_dir="$W/step-$1"
   rm -rf "$scope_dir"; mkdir -p "$scope_dir/src/sub" "$scope_dir/src/ro" "$scope_dir/tmp"
   echo ok1 > "$scope_dir/src/ok1.txt"
   echo ok2 > "$scope_dir/src/sub/ok2.txt"
   echo bad > "$scope_dir/src/ro/bad.txt"
   printf '%s\n' ok1.txt sub/ok2.txt ro/bad.txt > "$scope_dir/tmp/files_upload.txt"
   : > "$scope_dir/tmp/files_delete.txt"
-  extract_step /repo/.github/workflows/ci-cd.yml "$id" > "$scope_dir/step.sh"
+  extract_step /repo/.github/workflows/ci-cd.yml deploy-ftp > "$scope_dir/step.sh"
   ( cd "$scope_dir/src" && env -i PATH="$PATH" HOME=/tmp RUNNER_TEMP="$scope_dir/tmp" \
       DEPLOY_HOST=ftp DEPLOY_PORT=2121 DEPLOY_USER=ftpu DEPLOY_KEY=ftppw DEPLOY_PATH="site" \
-      DEPLOY_LOCAL_DIR=./ DEPLOY_MIRROR=false \
+      DEPLOY_LOCAL_DIR=./ DEPLOY_MIRROR=false SCOPE="$scope" \
       timeout 240 bash "$scope_dir/step.sh" ) > "$scope_dir/out.log" 2>&1
 }
 
-for id in ftp-selective ftp-full; do
+for id in selective full; do
   printf 'rm -r -f site/ok1.txt site/sub\n' | lftp -p 2121 -u ftpu,ftppw ftp >/dev/null 2>&1
   run_ftp_step "$id"
   code=$?

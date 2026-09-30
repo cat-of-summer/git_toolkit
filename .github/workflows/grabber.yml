@@ -4,54 +4,55 @@ on:
   workflow_dispatch:
     inputs:
       source_repo:
-        description: 'Source git repository (URL, owner/repo, self; empty = server, or current repo when source_ref is set)'
+        description: 'Source git repository: URL, owner/repo or self. Empty = the server (or this repository when source_ref is set).'
         required: false
         type: string
         default: ''
       source_ref:
-        description: 'Source branch / tag / commit'
+        description: 'Source branch, tag or commit. Empty = default branch of the source.'
         required: false
         type: string
         default: ''
       source_path:
-        description: 'Subdirectory inside the source repository'
+        description: 'Subdirectory inside the source repository. Empty = repository root.'
         required: false
         type: string
         default: ''
       commits:
-        description: 'Comma-separated commits to grab files from'
+        description: 'Comma-separated commits to grab files from. Empty = grab everything.'
         required: false
         type: string
         default: ''
       deploy_mirror:
-        description: 'Keep all:false; delete files removed on server:true;'
+        description: 'Deletions: false = keep all, true = delete files missing in the source.'
         required: false
-        type: string
+        type: choice
+        options: ['false', 'true']
         default: 'false'
   workflow_call:
     inputs:
       source_repo:
-        description: 'Source git repository (URL, owner/repo, self; empty = server, or current repo when source_ref is set)'
+        description: 'Source git repository: URL, owner/repo or self. Empty = the server (or this repository when source_ref is set).'
         required: false
         type: string
         default: ''
       source_ref:
-        description: 'Source branch / tag / commit'
+        description: 'Source branch, tag or commit. Empty = default branch of the source.'
         required: false
         type: string
         default: ''
       source_path:
-        description: 'Subdirectory inside the source repository'
+        description: 'Subdirectory inside the source repository. Empty = repository root.'
         required: false
         type: string
         default: ''
       commits:
-        description: 'Comma-separated commits to grab files from'
+        description: 'Comma-separated commits to grab files from. Empty = grab everything.'
         required: false
         type: string
         default: ''
       deploy_mirror:
-        description: 'Keep all:false; delete files removed on server:true;'
+        description: 'Deletions: false = keep all, true = delete files missing in the source.'
         required: false
         type: string
         default: 'false'
@@ -68,6 +69,10 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   resolve-ref:
     runs-on: ubuntu-latest
@@ -83,7 +88,6 @@ jobs:
     steps:
       - name: Resolve ref
         id: ref
-        shell: bash
         env:
           MULTIPLE_PACKAGES: ${{ vars.MULTIPLE_PACKAGES }}
         run: |
@@ -193,7 +197,6 @@ jobs:
 
       - name: Resolve environment
         id: env
-        shell: bash
         env:
           MULTIPLE_PACKAGES: ${{ vars.MULTIPLE_PACKAGES }}
           REF_TYPE: ${{ steps.ref.outputs.ref_type }}
@@ -210,13 +213,8 @@ jobs:
           __fail() { echo "::error::$1" >&2; exit 1; }
 
           MULTIPLE_PACKAGES="$(__trim "${MULTIPLE_PACKAGES:-}" | tr '[:upper:]' '[:lower:]')"
-          __input_env="$(__trim "${INPUT_ENVIRONMENT:-}")"
 
-          if [ -n "$__input_env" ]; then
-            REF_BRANCH="$(__slug "$__input_env")"
-            echo "Environment overridden by the workflow_dispatch input."
-
-          elif [ -z "${REF_BRANCH:-}" ]; then
+          if [ -z "${REF_BRANCH:-}" ]; then
             __found="$(git branch -r --contains "$REF_COMMIT" 2>/dev/null | grep -v HEAD | head -1 | sed 's#.*origin/##' | tr -d '[:space:]' || true)"
             if [ -z "$__found" ]; then
               __fail "Cannot tell which branch tag '$REF_NAME' was cut from: commit $REF_COMMIT is not on any remote branch. Checkout with fetch-depth: 0 is required."
@@ -247,7 +245,7 @@ jobs:
           echo "REF_BRANCH=$REF_BRANCH" >> "$GITHUB_ENV"
 
           unset -f __slug __trim __fail
-          unset __input_env __found __suffix
+          unset __found __suffix
           # <<< .github/snippets/resolve-env.sh
 
   grab:
@@ -271,8 +269,8 @@ jobs:
       COMMITS: ${{ inputs.commits || '' }}
 
     steps:
-      - name: Normalize config
-        shell: bash
+      - name: Resolve config
+        id: config
         env:
           DEPLOY_METHOD_RAW: ${{ vars.DEPLOY_METHOD }}
           DEPLOY_MIRROR_RAW: ${{ inputs.deploy_mirror || 'false' }}
@@ -283,7 +281,8 @@ jobs:
           set -euo pipefail
 
           lower() { printf '%s' "${1:-}" | tr -d '\r' | tr '[:upper:]' '[:lower:]'; }
-          trim() { printf '%s' "${1:-}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          trim()  { printf '%s' "${1:-}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          fail()  { echo "::error::$1" >&2; exit 1; }
 
           DEPLOY_METHOD="$(lower "$(trim "${DEPLOY_METHOD_RAW:-}")")"
           DEPLOY_MIRROR="$(lower "$(trim "${DEPLOY_MIRROR_RAW:-}")")"
@@ -309,11 +308,11 @@ jobs:
           [ "$SOURCE_PATH" = "." ] && SOURCE_PATH=""
 
           if [ "$GRAB_MODE" = "server" ] && [ -n "$SOURCE_PATH" ]; then
-            echo "::error::source_path is set, but neither source_repo nor source_ref is — there is no source repository to take a subdirectory from." >&2
-            exit 1
+            fail "source_path is set, but neither source_repo nor source_ref is — there is no source repository to take a subdirectory from."
           fi
 
           SOURCE_URL=""
+          APT_PACKAGES=""
           if [ "$GRAB_MODE" = "repo" ]; then
             SERVER="${GITHUB_SERVER_URL%/}"
             case "$SOURCE_REPO" in
@@ -341,17 +340,24 @@ jobs:
                 if printf '%s' "$SOURCE_REPO" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
                   SOURCE_URL="$SERVER/${SOURCE_REPO%.git}.git"
                 else
-                  echo "::error::Cannot understand source_repo='$SOURCE_REPO'. Expected 'owner/repo', 'self', 'https://host/path', 'git@host:path' or 'ssh://git@host/path'." >&2
-                  exit 1
+                  fail "Cannot understand source_repo='$SOURCE_REPO'. Expected 'owner/repo', 'self', 'https://host/path', 'git@host:path' or 'ssh://git@host/path'."
                 fi
                 ;;
             esac
           else
             case "$DEPLOY_METHOD" in
-              rsync|ftp) ;;
+              ftp)
+                APT_PACKAGES="lftp"
+                ;;
+              rsync)
+                # A DEPLOY_KEY that is not a PEM key is a password: ssh needs sshpass for it.
+                case "${DEPLOY_KEY%%$'\n'*}" in
+                  -----BEGIN*) ;;
+                  *) APT_PACKAGES="sshpass" ;;
+                esac
+                ;;
               *)
-                echo "::error::grabber supports only DEPLOY_METHOD=rsync | ftp (got '$DEPLOY_METHOD'). Downloading from the server has no meaning for command or git. To grab from a git repository set source_repo / source_ref instead." >&2
-                exit 1
+                fail "grabber supports only DEPLOY_METHOD=rsync | ftp (got '$DEPLOY_METHOD'). Downloading from the server has no meaning for command or git. To grab from a git repository set source_repo / source_ref instead."
                 ;;
             esac
           fi
@@ -363,7 +369,7 @@ jobs:
           if [ "$GRAB_MODE" = "repo" ]; then
             echo "mode=repo source=$SOURCE_URL ref=${SOURCE_REF:-<default>} path=${SOURCE_PATH:-<root>} mirror=$DEPLOY_MIRROR"
           else
-            echo "mode=server method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR"
+            echo "mode=server method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR apt=${APT_PACKAGES:-<none>}"
           fi
 
           {
@@ -375,30 +381,25 @@ jobs:
             echo "DEPLOY_METHOD=$DEPLOY_METHOD"
             echo "DEPLOY_MIRROR=$DEPLOY_MIRROR"
           } >> "$GITHUB_ENV"
+          echo "apt_packages=$APT_PACKAGES" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Configure git
-        shell: bash
-        run: |
-          git config core.fileMode false
-          git config core.autocrlf false
-          git config core.quotepath false
-
-      - name: Setup source auth
+      - name: Fetch source
         if: ${{ env.GRAB_MODE == 'repo' }}
-        shell: bash
         env:
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
           PAT_USER: ${{ secrets.PAT_USER }}
           PAT_PASSWORD: ${{ secrets.PAT_PASSWORD }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
 
+          # --- Pick the first credential the source accepts ---
           for v in "${PAT_TOKEN:-}" "${PAT_PASSWORD:-}"; do
             if [ -n "$v" ]; then printf '::add-mask::%s\n' "$v"; fi
           done
@@ -441,7 +442,7 @@ jobs:
 
           CHOSEN=-1
           for i in "${!LABELS[@]}"; do
-            echo "source auth: probing ${LABELS[$i]}..."
+            echo "Source auth: probing ${LABELS[$i]}..."
             if GT_GIT_USER="${USERS[$i]}" GT_GIT_PASS="${PASSES[$i]}" \
                git -c credential.helper= -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
                    ls-remote --heads "$SOURCE_URL" >/dev/null 2> "$RUNNER_TEMP/gt_probe_$i.log"; then
@@ -457,32 +458,16 @@ jobs:
             has() { if [ -n "${1:-}" ]; then echo yes; else echo no; fi; }
             echo "Secrets present: PAT_USER=$(has "${PAT_USER:-}") PAT_PASSWORD=$(has "${PAT_PASSWORD:-}") PAT_TOKEN=$(has "${PAT_TOKEN:-}")"
             for f in "$RUNNER_TEMP"/gt_probe_*.log; do
-              [ -s "$f" ] && { echo "--- $(basename "$f") ---"; cat "$f"; }
+              if [ -s "$f" ]; then echo "=== $(basename "$f") ==="; cat "$f"; fi
             done
             exit 1
           fi
 
-          CRED="$RUNNER_TEMP/gt-git-cred.sh"
-          : > "$CRED"
-          chmod 600 "$CRED"
-          {
-            printf 'export GT_GIT_USER=%q\n' "${USERS[$CHOSEN]}"
-            printf 'export GT_GIT_PASS=%q\n' "${PASSES[$CHOSEN]}"
-            printf 'export GIT_ASKPASS=%q\n' "$ASKPASS"
-            printf 'export GIT_TERMINAL_PROMPT=0\n'
-          } >> "$CRED"
+          export GT_GIT_USER="${USERS[$CHOSEN]}"
+          export GT_GIT_PASS="${PASSES[$CHOSEN]}"
+          echo "Source auth: using ${LABELS[$CHOSEN]}"
 
-          echo "GT_GIT_CRED=$CRED" >> "$GITHUB_ENV"
-          echo "source auth: using ${LABELS[$CHOSEN]}"
-
-      - name: Fetch source
-        if: ${{ env.GRAB_MODE == 'repo' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          . "$GT_GIT_CRED"
-
+          # --- Fetch ---
           SRC="$RUNNER_TEMP/source"
           rm -rf "$SRC"
           mkdir -p "$SRC"
@@ -498,7 +483,7 @@ jobs:
             REF=$(git -C "$SRC" ls-remote --symref origin HEAD | awk '/^ref:/ {print $2; exit}')
             REF="${REF#refs/heads/}"
             [ -z "$REF" ] && REF=HEAD
-            echo "source ref not specified — using default branch '$REF'"
+            echo "Source ref not specified — using the default branch '$REF'"
           fi
 
           FETCHED=0
@@ -545,81 +530,25 @@ jobs:
             echo "SOURCE_REF_NAME_NORM=$(printf '%s' "$REF" | tr '/' '-')"
           } >> "$GITHUB_ENV"
 
-      - name: Resolve TARGET_COMMIT
-        shell: bash
+      - name: Resolve commit files
         run: |
           set -euo pipefail
 
           SRC_GIT="${SRC_GIT:-.}"
 
+          # --- Target commit: the newest of COMMITS; its parent becomes the base of the sync branch ---
           if [ -z "$COMMITS" ]; then
             TARGET_COMMIT=$(git -C "$SRC_GIT" rev-parse HEAD)
             echo "No commits specified — TARGET_COMMIT = HEAD = $TARGET_COMMIT"
-          else
-            readarray -t COMMITS_ARR < <(echo "$COMMITS" | tr ',; \t\r\n' '\n' | tr -s '\n' | grep -v '^[[:space:]]*$')
-            TARGET_COMMIT=$(git -C "$SRC_GIT" log --no-walk --format='%ct %H' "${COMMITS_ARR[@]}" | sort -k1 -nr | head -1 | awk '{print $2}')
-            echo "Resolved TARGET_COMMIT (latest by committer-date) = $TARGET_COMMIT"
-
-            if [ "${#COMMITS_ARR[@]}" -eq 1 ]; then
-              MERGE_BASE="${COMMITS_ARR[0]}"
-            else
-              MERGE_BASE=$(git -C "$SRC_GIT" merge-base --octopus "${COMMITS_ARR[@]}")
-            fi
-
-            PARENT=""
-            if ! PARENT=$(git -C "$SRC_GIT" rev-parse --verify --quiet "${MERGE_BASE}^"); then
-              PARENT=""
-            fi
-
-            BASE_COMMIT=""
-            if [ -n "$PARENT" ]; then
-              if ! BASE_COMMIT=$(git rev-parse --verify --quiet "${PARENT}^{commit}"); then
-                BASE_COMMIT=""
-              fi
-            fi
-
-            if [ -n "$BASE_COMMIT" ]; then
-              echo "BASE_COMMIT (parent of merge-base $MERGE_BASE) = $BASE_COMMIT"
-              echo "BASE_COMMIT=$BASE_COMMIT" >> "$GITHUB_ENV"
-            elif [ -z "$PARENT" ]; then
-              echo "::warning::Cannot resolve parent of $MERGE_BASE (root commit?) — sync branch will fall back to HEAD"
-            else
-              echo "::warning::Commit $PARENT is not present in this repository (unrelated source history) — sync branch will fall back to HEAD"
-            fi
-          fi
-
-          echo "TARGET_COMMIT=$TARGET_COMMIT" >> "$GITHUB_ENV"
-
-      - name: Resolve commits files
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -z "$COMMITS" ]; then
+            echo "TARGET_COMMIT=$TARGET_COMMIT" >> "$GITHUB_ENV"
             echo "COMMITS_MODE=false" >> "$GITHUB_ENV"
             exit 0
           fi
-
-          echo "COMMITS_MODE=true" >> "$GITHUB_ENV"
-
-          SRC_GIT="${SRC_GIT:-.}"
-          if [ "$GRAB_MODE" = "repo" ]; then
-            STRIP_DIR="$SOURCE_PATH"
-          else
-            STRIP_DIR="$LOCAL_DIR"
-          fi
-
-          TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
-          ALL_FILES="$RUNNER_TEMP/all_files.txt"
-          > "$TO_DOWNLOAD"
-          > "$ALL_FILES"
 
           readarray -t COMMITS_ARR < <(echo "$COMMITS" | tr ',; \t\r\n' '\n' | tr -s '\n' | grep -v '^[[:space:]]*$')
 
           BAD_COMMITS=""
           for commit in "${COMMITS_ARR[@]}"; do
-            commit="${commit// /}"
-            [ -z "$commit" ] && continue
             if ! git -C "$SRC_GIT" cat-file -e "${commit}^{commit}" 2>/dev/null; then
               BAD_COMMITS="$BAD_COMMITS $commit"
             fi
@@ -629,52 +558,143 @@ jobs:
             exit 1
           fi
 
+          TARGET_COMMIT=$(git -C "$SRC_GIT" log --no-walk --format='%ct %H' "${COMMITS_ARR[@]}" | sort -k1 -nr | head -1 | awk '{print $2}')
+          echo "TARGET_COMMIT (latest by committer date) = $TARGET_COMMIT"
+
+          if [ "${#COMMITS_ARR[@]}" -eq 1 ]; then
+            MERGE_BASE="${COMMITS_ARR[0]}"
+          else
+            MERGE_BASE=$(git -C "$SRC_GIT" merge-base --octopus "${COMMITS_ARR[@]}")
+          fi
+
+          PARENT=""
+          if ! PARENT=$(git -C "$SRC_GIT" rev-parse --verify --quiet "${MERGE_BASE}^"); then
+            PARENT=""
+          fi
+
+          BASE_COMMIT=""
+          if [ -n "$PARENT" ]; then
+            if ! BASE_COMMIT=$(git rev-parse --verify --quiet "${PARENT}^{commit}"); then
+              BASE_COMMIT=""
+            fi
+          fi
+
+          if [ -n "$BASE_COMMIT" ]; then
+            echo "BASE_COMMIT (parent of merge-base $MERGE_BASE) = $BASE_COMMIT"
+            echo "BASE_COMMIT=$BASE_COMMIT" >> "$GITHUB_ENV"
+          elif [ -z "$PARENT" ]; then
+            echo "::warning::Cannot resolve the parent of $MERGE_BASE (root commit?) — the sync branch will start from HEAD."
+          else
+            echo "::warning::Commit $PARENT is not present in this repository (unrelated source history) — the sync branch will start from HEAD."
+          fi
+
+          {
+            echo "TARGET_COMMIT=$TARGET_COMMIT"
+            echo "COMMITS_MODE=true"
+          } >> "$GITHUB_ENV"
+
+          # --- Files touched by the commits and still alive at TARGET_COMMIT ---
+          if [ "$GRAB_MODE" = "repo" ]; then
+            STRIP_DIR="$SOURCE_PATH"
+          else
+            STRIP_DIR="$LOCAL_DIR"
+          fi
+
+          TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
+          ALL_FILES="$RUNNER_TEMP/all_files.txt"
+          : > "$TO_DOWNLOAD"
+          : > "$ALL_FILES"
+
           for commit in "${COMMITS_ARR[@]}"; do
-            commit="${commit// /}"
-            [ -z "$commit" ] && continue
-            echo "=== Processing commit: $commit ==="
+            echo "=== Commit $commit ==="
             git -C "$SRC_GIT" diff-tree --no-commit-id -r --name-only -m --first-parent "$commit" >> "$ALL_FILES"
           done
 
-          { grep -vE '^\.git' "$ALL_FILES" || true; } > "$ALL_FILES.tmp"
+          { grep -vE '^\.git' "$ALL_FILES" || true; } | sort -u > "$ALL_FILES.tmp"
           mv "$ALL_FILES.tmp" "$ALL_FILES"
-
-          sort -u -o "$ALL_FILES" "$ALL_FILES"
 
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             if [ -z "$STRIP_DIR" ]; then
-              if git -C "$SRC_GIT" cat-file -e "$TARGET_COMMIT:$file" 2>/dev/null; then
-                echo "$file" >> "$TO_DOWNLOAD"
-              else
-                echo "::warning::Skipping '$file': not present at TARGET_COMMIT $TARGET_COMMIT"
-              fi
+              rel="$file"
             elif [[ "$file" == "$STRIP_DIR/"* ]]; then
-              stripped="${file#"$STRIP_DIR/"}"
-              if git -C "$SRC_GIT" cat-file -e "$TARGET_COMMIT:$file" 2>/dev/null; then
-                echo "$stripped" >> "$TO_DOWNLOAD"
-              else
-                echo "::warning::Skipping '$file': not present at TARGET_COMMIT $TARGET_COMMIT"
-              fi
+              rel="${file#"$STRIP_DIR/"}"
+            else
+              continue
+            fi
+            if git -C "$SRC_GIT" cat-file -e "$TARGET_COMMIT:$file" 2>/dev/null; then
+              echo "$rel" >> "$TO_DOWNLOAD"
+            else
+              echo "::warning::Skipping '$file': not present at TARGET_COMMIT $TARGET_COMMIT"
             fi
           done < "$ALL_FILES"
 
           sort -u -o "$TO_DOWNLOAD" "$TO_DOWNLOAD"
           cp "$TO_DOWNLOAD" "$RUNNER_TEMP/commits_original.txt"
 
-          echo "=== Files from commits (alive at TARGET_COMMIT): $(wc -l < "$TO_DOWNLOAD") ==="
+          echo "Files from commits (alive at TARGET_COMMIT): $(wc -l < "$TO_DOWNLOAD")"
 
           if ! [ -s "$TO_DOWNLOAD" ]; then
-            echo "::warning::No files found in the specified commits"
+            echo "::warning::No files found in the specified commits."
             echo "NOTHING_TO_SYNC=true" >> "$GITHUB_ENV"
           fi
 
-      - name: Setup ssh auth
-        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'rsync' }}
-        shell: bash
-        run: |
-          set -uo pipefail
+      - name: Cache system packages
+        id: cache-apt
+        if: ${{ steps.config.outputs.apt_packages != '' }}
+        uses: actions/cache@v6
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-${{ steps.config.outputs.apt_packages }}-v3
 
+      - name: Install system packages
+        if: ${{ steps.config.outputs.apt_packages != '' }}
+        env:
+          APT_PACKAGES: ${{ steps.config.outputs.apt_packages }}
+          CACHE_HIT: ${{ steps.cache-apt.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+
+          # >>> .github/snippets/apt-install.sh
+          read -r -a __pkgs <<< "${APT_PACKAGES:-}"
+
+          __missing=()
+          for __p in "${__pkgs[@]}"; do
+            command -v "$__p" >/dev/null 2>&1 || __missing+=("$__p")
+          done
+
+          if [ "${#__missing[@]}" -eq 0 ]; then
+            echo "System packages already present: ${__pkgs[*]:-<none>}"
+          else
+            # Keep downloaded .deb files so the apt cache step has something to save.
+            echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99keep-cache >/dev/null
+
+            __debs=()
+            for __p in "${__missing[@]}"; do
+              for __d in /var/cache/apt/archives/"${__p}"_*.deb; do
+                [ -f "$__d" ] && __debs+=("$__d")
+              done
+            done
+
+            if [ "${CACHE_HIT:-}" = "true" ] && [ "${#__debs[@]}" -ge "${#__missing[@]}" ]; then
+              echo "Installing from the apt cache: ${__missing[*]}"
+              sudo dpkg -i "${__debs[@]}" || sudo apt-get install -f -y --no-install-recommends
+            else
+              echo "Installing: ${__missing[*]}"
+              sudo apt-get update -q
+              sudo apt-get install -y --no-install-recommends "${__missing[@]}"
+            fi
+          fi
+
+          unset __pkgs __missing __p __debs __d
+          # <<< .github/snippets/apt-install.sh
+
+      - name: Set up SSH access
+        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'rsync' }}
+        run: |
+          set -euo pipefail
+
+          # >>> .github/snippets/ssh-auth.sh
           TMP_KEY=$(mktemp)
           printf '%s\n' "$DEPLOY_KEY" > "$TMP_KEY"
           chmod 600 "$TMP_KEY"
@@ -691,11 +711,10 @@ jobs:
 
           if [ "$IS_PEM" = 0 ]; then
             if ! command -v sshpass >/dev/null 2>&1; then
-              sudo apt-get update -q
-              sudo apt-get install -y --no-install-recommends sshpass
+              echo "::error::DEPLOY_KEY is not a PEM private key, so it is used as a password, but sshpass is not installed (step 'Install system packages' should have done it)." >&2
+              exit 1
             fi
-            echo "ssh auth: probing password..."
-
+            echo "SSH auth: probing password..."
             if sshpass -f "$TMP_KEY" ssh \
                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                  -o NumberOfPasswordPrompts=1 "${SSH_COMMON[@]}" \
@@ -706,7 +725,7 @@ jobs:
           fi
 
           if [ -z "$GT_AUTH_MODE" ]; then
-            echo "ssh auth: probing private key..."
+            echo "SSH auth: probing private key..."
             if ssh -i "$TMP_KEY" \
                  -o PreferredAuthentications=publickey -o IdentitiesOnly=yes -o BatchMode=yes \
                  "${SSH_COMMON[@]}" \
@@ -719,7 +738,7 @@ jobs:
           if [ -z "$GT_AUTH_MODE" ]; then
             echo "::error::Cannot authenticate to $DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PORT — DEPLOY_KEY was tried both as a password and as a private key."
             for f in "$RUNNER_TEMP/ssh_probe_password.log" "$RUNNER_TEMP/ssh_probe_key.log"; do
-              [ -s "$f" ] && { echo "--- $(basename "$f") ---"; cat "$f"; }
+              if [ -s "$f" ]; then echo "=== $(basename "$f") ==="; cat "$f"; fi
             done
             exit 1
           fi
@@ -741,374 +760,248 @@ jobs:
 
           echo "GT_SSH=$GT_SSH" >> "$GITHUB_ENV"
           echo "GT_AUTH_MODE=$GT_AUTH_MODE" >> "$GITHUB_ENV"
-          echo "ssh auth: using $GT_AUTH_MODE"
+          echo "SSH auth: using $GT_AUTH_MODE"
+          # <<< .github/snippets/ssh-auth.sh
 
-      - name: Cache lftp
-        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'ftp' }}
-        id: cache-lftp
-        uses: actions/cache@v6
-        with:
-          path: /var/cache/apt/archives
-          key: ${{ runner.os }}-apt-lftp-v2
-
-      - name: Keep apt packages for caching
-        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'ftp' }}
-        shell: bash
-        run: echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99keep-cache >/dev/null
-
-      - name: Install lftp
-        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'ftp' }}
-        shell: bash
-        run: |
-          if [ "${{ steps.cache-lftp.outputs.cache-hit }}" = "true" ] && ls /var/cache/apt/archives/lftp_*.deb &>/dev/null; then
-            sudo dpkg -i /var/cache/apt/archives/lftp_*.deb || sudo apt-get install -f -y --no-install-recommends
-          else
-            sudo apt-get update -q
-            sudo apt-get install -y --no-install-recommends lftp
-          fi
-
-      - name: List server files
-        if: ${{ env.GRAB_MODE == 'server' }}
-        shell: bash
+      - name: List files
         run: |
           set -euo pipefail
+          export LC_ALL=C
 
           SERVER_FILES="$RUNNER_TEMP/server_files.txt"
+          TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
           : > "$SERVER_FILES"
 
-          echo "listing: mode=$GRAB_MODE method='$DEPLOY_METHOD' commits=$COMMITS_MODE"
+          # Fills SERVER_FILES: in commits mode — the commit files that exist on the server,
+          # otherwise — every file on the server.
+          list_server() {
+            local path="${DEPLOY_PATH%/}"
+            echo "Listing the server: method=$DEPLOY_METHOD commits=$COMMITS_MODE"
 
-          if [ "$COMMITS_MODE" = "true" ]; then
-            TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
-            > "$SERVER_FILES"
-            DEPLOY_PATH_STRIPPED="${DEPLOY_PATH%/}"
+            if [ "$COMMITS_MODE" = "true" ]; then
+              if [ "$DEPLOY_METHOD" = "rsync" ]; then
+                "$GT_SSH" "$DEPLOY_USER@$DEPLOY_HOST" \
+                  "while IFS= read -r f; do [ -f \"${path}/\$f\" ] && printf '%s\n' \"\$f\"; done; exit 0" \
+                  < "$TO_DOWNLOAD" > "$SERVER_FILES"
+              else
+                cp "$TO_DOWNLOAD" "$SERVER_FILES"
+              fi
+              echo "Files from commits found on the server: $(wc -l < "$SERVER_FILES")"
+              return 0
+            fi
 
             if [ "$DEPLOY_METHOD" = "rsync" ]; then
               "$GT_SSH" "$DEPLOY_USER@$DEPLOY_HOST" \
-                "while IFS= read -r f; do [ -f \"${DEPLOY_PATH_STRIPPED}/\$f\" ] && printf '%s\n' \"\$f\"; done; exit 0" \
-                < "$TO_DOWNLOAD" > "$SERVER_FILES"
-
-            elif [ "$DEPLOY_METHOD" = "ftp" ]; then
-              cp "$TO_DOWNLOAD" "$SERVER_FILES"
-
+                "find -L '$DEPLOY_PATH' -type f -printf '%P\n'" \
+                | { grep -vE '^\.git' || true; } > "$SERVER_FILES"
             else
-              echo "::error::Unsupported DEPLOY_METHOD='$DEPLOY_METHOD' in server mode — expected 'rsync' or 'ftp'." >&2
-              exit 1
+              local raw="$RUNNER_TEMP/server_files_raw.txt" pid count
+              : > "$raw"
+              printf '%s\n' \
+                "set net:timeout 30" \
+                "set net:max-retries 5" \
+                "set net:reconnect-interval-base 5" \
+                "set ftp:passive-mode true" \
+                "set ssl:verify-certificate no" \
+                "set cmd:fail-exit true" \
+                "find $DEPLOY_PATH" \
+                "quit" \
+                | lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" > "$raw" &
+              pid=$!
+              echo "Listing files on the FTP server (progress every 15s)..."
+              while kill -0 "$pid" 2>/dev/null; do
+                sleep 15
+                count=$(wc -l < "$raw" 2>/dev/null || echo 0)
+                echo "  ... ${count} files listed so far"
+              done
+              wait "$pid"
+              { grep -v '/$' "$raw" || true; } \
+                | sed "s|^${path}/||" \
+                | { grep -vE '^$|^\.git' || true; } > "$SERVER_FILES"
+            fi
+            echo "Files on the server: $(wc -l < "$SERVER_FILES")"
+          }
+
+          # Same for a git source: tracked files under SOURCE_PATH.
+          list_source() {
+            local prefix=""
+            [ -n "$SOURCE_PATH" ] && prefix="$SOURCE_PATH/"
+
+            if [ "$COMMITS_MODE" = "true" ]; then
+              while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                if [ -f "$SRC_GIT/$prefix$f" ]; then printf '%s\n' "$f" >> "$SERVER_FILES"; fi
+              done < "$TO_DOWNLOAD"
+              echo "Files from commits found in the source: $(wc -l < "$SERVER_FILES")"
+              return 0
             fi
 
-            cp "$SERVER_FILES" "$TO_DOWNLOAD"
-            FOUND=$(wc -l < "$SERVER_FILES")
-            echo "=== Files from commits found on server: $FOUND ==="
-            exit 0
-          fi
-
-          if [ "$DEPLOY_METHOD" = "rsync" ]; then
-            "$GT_SSH" "$DEPLOY_USER@$DEPLOY_HOST" \
-              "find -L '$DEPLOY_PATH' -type f -printf '%P\n'" \
-              | { LC_ALL=C grep -vE '^\.git' || true; } > "$SERVER_FILES"
-
-          elif [ "$DEPLOY_METHOD" = "ftp" ]; then
-            touch "$RUNNER_TEMP/server_files_raw.txt"
-            lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" <<LFTP > "$RUNNER_TEMP/server_files_raw.txt" &
-          set net:timeout 30
-          set net:max-retries 5
-          set net:reconnect-interval-base 5
-          set ftp:passive-mode true
-          set ssl:verify-certificate no
-          set cmd:fail-exit true
-          find $DEPLOY_PATH
-          quit
-          LFTP
-            LFTP_PID=$!
-            echo "=== Listing files on FTP server (progress every 15s) ==="
-            while kill -0 "$LFTP_PID" 2>/dev/null; do
-              sleep 15
-              COUNT=$(wc -l < "$RUNNER_TEMP/server_files_raw.txt" 2>/dev/null || echo 0)
-              echo "  ... ${COUNT} files listed so far"
-            done
-            wait "$LFTP_PID"
-            DEPLOY_PATH_STRIPPED="${DEPLOY_PATH%/}"
-            { LC_ALL=C grep -v '/$' "$RUNNER_TEMP/server_files_raw.txt" || true; } \
-              | LC_ALL=C sed "s|^${DEPLOY_PATH_STRIPPED}/||" \
-              | { LC_ALL=C grep -vE '^$|^\.git' || true; } > "$SERVER_FILES"
-
-          else
-            echo "::error::Unsupported DEPLOY_METHOD='$DEPLOY_METHOD' in server mode — expected 'rsync' or 'ftp'." >&2
-            exit 1
-          fi
-
-          TOTAL=$(wc -l < "$SERVER_FILES")
-          echo "=== Total files on server: $TOTAL ==="
-
-      - name: List source files
-        if: ${{ env.GRAB_MODE == 'repo' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          export LC_ALL=C
-
-          SERVER_FILES="$RUNNER_TEMP/server_files.txt"
-          : > "$SERVER_FILES"
-          PREFIX=""
-          [ -n "$SOURCE_PATH" ] && PREFIX="$SOURCE_PATH/"
-
-          if [ "$COMMITS_MODE" = "true" ]; then
-            TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
-            > "$SERVER_FILES"
-            while IFS= read -r f; do
-              [ -z "$f" ] && continue
-              if [ -f "$SRC_GIT/$PREFIX$f" ]; then printf '%s\n' "$f" >> "$SERVER_FILES"; fi
-            done < "$TO_DOWNLOAD"
-
-            cp "$SERVER_FILES" "$TO_DOWNLOAD"
-            FOUND=$(wc -l < "$SERVER_FILES")
-            echo "=== Files from commits found in source: $FOUND ==="
-            exit 0
-          fi
-
-          if [ -n "$SOURCE_PATH" ]; then
-            if [ -z "$(git -C "$SRC_GIT" ls-files -- "$SOURCE_PATH")" ]; then
-              echo "::error::source_path '$SOURCE_PATH' holds no tracked files in $SOURCE_URL at ref '$SOURCE_REF_NAME'." >&2
-              exit 1
+            if [ -n "$SOURCE_PATH" ]; then
+              if [ -z "$(git -C "$SRC_GIT" ls-files -- "$SOURCE_PATH")" ]; then
+                echo "::error::source_path '$SOURCE_PATH' holds no tracked files in $SOURCE_URL at ref '$SOURCE_REF_NAME'." >&2
+                exit 1
+              fi
+              git -C "$SRC_GIT" ls-files -- "$SOURCE_PATH" \
+                | while IFS= read -r f; do printf '%s\n' "${f#"$SOURCE_PATH/"}"; done \
+                | { grep -vE '^\.git' || true; } > "$SERVER_FILES"
+            else
+              git -C "$SRC_GIT" ls-files | { grep -vE '^\.git' || true; } > "$SERVER_FILES"
             fi
-            git -C "$SRC_GIT" ls-files -- "$SOURCE_PATH" \
-              | while IFS= read -r f; do printf '%s\n' "${f#"$SOURCE_PATH/"}"; done \
-              | grep -vE '^\.git' > "$SERVER_FILES" || true
-          else
-            git -C "$SRC_GIT" ls-files | grep -vE '^\.git' > "$SERVER_FILES" || true
-          fi
+            echo "Files in the source: $(wc -l < "$SERVER_FILES")"
+          }
 
-          TOTAL=$(wc -l < "$SERVER_FILES")
-          echo "=== Total files in source: $TOTAL ==="
+          if [ "$GRAB_MODE" = "repo" ]; then list_source; else list_server; fi
 
-      - name: Filter files via .gitignore
-        shell: bash
-        run: |
-          set -euo pipefail
-          export LC_ALL=C
-
-          SERVER_FILES="$RUNNER_TEMP/server_files.txt"
-          FILTERED_FILES="$RUNNER_TEMP/to_download.txt"
+          # --- Drop what this repository's .gitignore excludes ---
           IGNORED_FILES="$RUNNER_TEMP/ignored.txt"
-
-          if [ ! -f "$SERVER_FILES" ]; then
-            echo "::error::File list was never produced — the listing step did not run (GRAB_MODE='${GRAB_MODE:-}', DEPLOY_METHOD='${DEPLOY_METHOD:-}', COMMITS_MODE='${COMMITS_MODE:-}')." >&2
-            exit 1
-          fi
+          PREFIXED="$RUNNER_TEMP/server_files_prefixed.txt"
 
           if [ -n "$LOCAL_DIR" ]; then
-            sed "s|^|$LOCAL_DIR/|" "$SERVER_FILES" > "$RUNNER_TEMP/server_files_prefixed.txt"
+            sed "s|^|$LOCAL_DIR/|" "$SERVER_FILES" > "$PREFIXED"
           else
-            cp "$SERVER_FILES" "$RUNNER_TEMP/server_files_prefixed.txt"
+            cp "$SERVER_FILES" "$PREFIXED"
           fi
 
-          git check-ignore --stdin < "$RUNNER_TEMP/server_files_prefixed.txt" > "$IGNORED_FILES" 2>/dev/null || true
+          git check-ignore --stdin < "$PREFIXED" > "$IGNORED_FILES" 2>/dev/null || true
 
-          comm -23 \
-            <(sort "$RUNNER_TEMP/server_files_prefixed.txt") \
-            <(sort "$IGNORED_FILES") \
-            | if [ -n "$LOCAL_DIR" ]; then
-                sed "s|^$LOCAL_DIR/||"
-              else
-                cat
-              fi \
-            > "$FILTERED_FILES"
+          comm -23 <(sort "$PREFIXED") <(sort "$IGNORED_FILES") \
+            | if [ -n "$LOCAL_DIR" ]; then sed "s|^$LOCAL_DIR/||"; else cat; fi \
+            > "$TO_DOWNLOAD"
 
-          TOTAL=$(wc -l < "$SERVER_FILES")
-          IGNORED=$(wc -l < "$IGNORED_FILES")
-          TO_DOWNLOAD=$(wc -l < "$FILTERED_FILES")
+          echo "=== Summary ==="
+          echo "Source files: $(wc -l < "$SERVER_FILES")"
+          echo "Ignored:      $(wc -l < "$IGNORED_FILES")"
+          echo "To download:  $(wc -l < "$TO_DOWNLOAD")"
 
-          echo "=== Source files:  $TOTAL ==="
-          echo "=== Ignored:       $IGNORED ==="
-          echo "=== To download:   $TO_DOWNLOAD ==="
-
-          if ! [ -s "$FILTERED_FILES" ]; then
-            if [ "$COMMITS_MODE" = "true" ] && [ "${DEPLOY_MIRROR}" = "true" ] && [ -s "$RUNNER_TEMP/commits_original.txt" ]; then
-              echo "::warning::No files to download from the source, but will apply mirror deletions"
+          if ! [ -s "$TO_DOWNLOAD" ]; then
+            if [ "$COMMITS_MODE" = "true" ] && [ "$DEPLOY_MIRROR" = "true" ] && [ -s "$RUNNER_TEMP/commits_original.txt" ]; then
+              echo "::warning::No files to download from the source, but mirror deletions will be applied."
             else
-              echo "::warning::No files to download after applying .gitignore filter"
+              echo "::warning::No files to download after applying the .gitignore filter."
               echo "NOTHING_TO_SYNC=true" >> "$GITHUB_ENV"
             fi
           fi
 
-      - name: FTP Download
-        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'ftp' && env.NOTHING_TO_SYNC != 'true' }}
-        shell: bash
+      - name: Download files
+        if: ${{ env.NOTHING_TO_SYNC != 'true' }}
         run: |
           set -euo pipefail
 
-          FILTERED_FILES="$RUNNER_TEMP/to_download.txt"
+          TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
+          if [ -n "$LOCAL_DIR" ]; then DEST_DIR="./$LOCAL_DIR"; else DEST_DIR="."; fi
 
-          if [ -n "$LOCAL_DIR" ]; then
-            DEST_DIR="./$LOCAL_DIR"
-          else
-            DEST_DIR="./"
-          fi
+          if [ "$GRAB_MODE" = "repo" ]; then
+            PREFIX=""
+            [ -n "$SOURCE_PATH" ] && PREFIX="$SOURCE_PATH/"
 
-          DEPLOY_PATH_STRIPPED="${DEPLOY_PATH%/}"
-
-          {
-            echo "set net:timeout 15"
-            echo "set net:max-retries 2"
-            echo "set net:reconnect-interval-base 2"
-            echo "set net:reconnect-interval-multiplier 1"
-            echo "set ftp:passive-mode true"
-            echo "set ssl:verify-certificate no"
-            echo "set xfer:clobber true"
-
-            if [ "$COMMITS_MODE" = "true" ]; then
-              echo "set cmd:fail-exit false"
-            else
-              echo "set cmd:fail-exit true"
-            fi
-
+            COPIED=0
+            MISSING=0
             while IFS= read -r file; do
               [ -z "$file" ] && continue
-              local_dir=$(dirname "$DEST_DIR/$file")
-              echo "mkdir -fp \"$local_dir\""
-              echo "get -O \"$local_dir\" \"$DEPLOY_PATH_STRIPPED/$file\""
-            done < "$FILTERED_FILES"
-
-            echo "quit"
-          } > "$RUNNER_TEMP/lftp_get.txt"
-
-          lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" < "$RUNNER_TEMP/lftp_get.txt"
-
-          if [ "$COMMITS_MODE" = "true" ]; then
-            > "$RUNNER_TEMP/server_files.txt"
-            while IFS= read -r file; do
-              [ -z "$file" ] && continue
-              if [ -n "$LOCAL_DIR" ]; then
-                local_path="./$LOCAL_DIR/$file"
-              else
-                local_path="./$file"
+              if [ ! -f "$SRC_GIT/$PREFIX$file" ]; then
+                MISSING=$((MISSING + 1))
+                continue
               fi
-              if [ -f "$local_path" ]; then echo "$file" >> "$RUNNER_TEMP/server_files.txt"; fi
-            done < "$RUNNER_TEMP/commits_original.txt"
-            echo "=== Files actually downloaded from server: $(wc -l < "$RUNNER_TEMP/server_files.txt") ==="
+              mkdir -p "$DEST_DIR/$(dirname "$file")"
+              cp -f "$SRC_GIT/$PREFIX$file" "$DEST_DIR/$file"
+              COPIED=$((COPIED + 1))
+            done < "$TO_DOWNLOAD"
+
+            echo "Files copied from the source: $COPIED"
+            if [ "$MISSING" -gt 0 ]; then
+              echo "::warning::$MISSING file(s) from the list are missing in the source working tree."
+            fi
+            exit 0
           fi
 
-      - name: RSYNC Download
-        if: ${{ env.GRAB_MODE == 'server' && env.DEPLOY_METHOD == 'rsync' && env.NOTHING_TO_SYNC != 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
+          if [ "$DEPLOY_METHOD" = "ftp" ]; then
+            {
+              echo "set net:timeout 15"
+              echo "set net:max-retries 2"
+              echo "set net:reconnect-interval-base 2"
+              echo "set net:reconnect-interval-multiplier 1"
+              echo "set ftp:passive-mode true"
+              echo "set ssl:verify-certificate no"
+              echo "set xfer:clobber true"
+              # In commits mode a file may be gone from the server: keep going, count what arrived.
+              if [ "$COMMITS_MODE" = "true" ]; then
+                echo "set cmd:fail-exit false"
+              else
+                echo "set cmd:fail-exit true"
+              fi
+              while IFS= read -r file; do
+                [ -z "$file" ] && continue
+                local_dir=$(dirname "$DEST_DIR/$file")
+                echo "mkdir -fp \"$local_dir\""
+                echo "get -O \"$local_dir\" \"${DEPLOY_PATH%/}/$file\""
+              done < "$TO_DOWNLOAD"
+              echo "quit"
+            } > "$RUNNER_TEMP/lftp_get.txt"
 
-          FILTERED_FILES="$RUNNER_TEMP/to_download.txt"
-
-          if [ -n "$LOCAL_DIR" ]; then
-            DEST_DIR="./$LOCAL_DIR/"
+            lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" < "$RUNNER_TEMP/lftp_get.txt"
           else
-            DEST_DIR="./"
+            RC=0
+            rsync -avz --progress \
+              -e "$GT_SSH" \
+              --files-from="$TO_DOWNLOAD" \
+              --ignore-missing-args \
+              --no-perms --no-owner --no-group \
+              --copy-links \
+              "$DEPLOY_USER@$DEPLOY_HOST:${DEPLOY_PATH%/}/" "$DEST_DIR/" || RC=$?
+
+            case "$RC" in
+              0) ;;
+              23|24) echo "::warning::rsync finished with code $RC (some files were missing or vanished) — continuing with what was actually transferred." ;;
+              *) exit "$RC" ;;
+            esac
           fi
 
-          RC=0
-          rsync -avz --progress \
-            -e "$GT_SSH" \
-            --files-from="$FILTERED_FILES" \
-            --ignore-missing-args \
-            --no-perms --no-owner --no-group \
-            --copy-links \
-            "$DEPLOY_USER@$DEPLOY_HOST:${DEPLOY_PATH%/}/" "$DEST_DIR" || RC=$?
-
-          case "$RC" in
-            0) ;;
-            23|24)
-              echo "::warning::rsync finished with code $RC (some files were missing or vanished) — continuing with what was actually transferred"
-              ;;
-            *)
-              exit "$RC"
-              ;;
-          esac
-
+          # In commits mode the commit step needs the list of files that really arrived.
           if [ "$COMMITS_MODE" = "true" ]; then
-            > "$RUNNER_TEMP/server_files.txt"
+            : > "$RUNNER_TEMP/server_files.txt"
             while IFS= read -r file; do
               [ -z "$file" ] && continue
-              if [ -n "$LOCAL_DIR" ]; then
-                local_path="./$LOCAL_DIR/$file"
-              else
-                local_path="./$file"
-              fi
-              if [ -f "$local_path" ]; then echo "$file" >> "$RUNNER_TEMP/server_files.txt"; fi
+              if [ -f "$DEST_DIR/$file" ]; then echo "$file" >> "$RUNNER_TEMP/server_files.txt"; fi
             done < "$RUNNER_TEMP/commits_original.txt"
-            echo "=== Files actually downloaded from server: $(wc -l < "$RUNNER_TEMP/server_files.txt") ==="
+            echo "Files actually downloaded from the server: $(wc -l < "$RUNNER_TEMP/server_files.txt")"
           fi
-
-      - name: Copy source files
-        if: ${{ env.GRAB_MODE == 'repo' && env.NOTHING_TO_SYNC != 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          FILTERED_FILES="$RUNNER_TEMP/to_download.txt"
-          PREFIX=""
-          [ -n "$SOURCE_PATH" ] && PREFIX="$SOURCE_PATH/"
-
-          if [ -n "$LOCAL_DIR" ]; then
-            DEST_DIR="./$LOCAL_DIR"
-          else
-            DEST_DIR="."
-          fi
-
-          COPIED=0
-          MISSING=0
-          while IFS= read -r file; do
-            [ -z "$file" ] && continue
-            if [ ! -f "$SRC_GIT/$PREFIX$file" ]; then
-              MISSING=$((MISSING + 1))
-              continue
-            fi
-            mkdir -p "$DEST_DIR/$(dirname "$file")"
-            cp -f "$SRC_GIT/$PREFIX$file" "$DEST_DIR/$file"
-            COPIED=$((COPIED + 1))
-          done < "$FILTERED_FILES"
-
-          echo "=== Files copied from source: $COPIED ==="
-          if [ "$MISSING" -gt 0 ]; then
-            echo "::warning::$MISSING file(s) from the list are missing in the source working tree"
-          fi
-
-      - name: Apply mirror deletions
-        if: ${{ env.DEPLOY_MIRROR == 'true' && env.COMMITS_MODE != 'true' && env.NOTHING_TO_SYNC != 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          export LC_ALL=C
-
-          SERVER_FILES="$RUNNER_TEMP/server_files.txt"
-          TRACKED_REL="$RUNNER_TEMP/tracked_rel.txt"
-
-          if [ ! -s "$SERVER_FILES" ]; then
-            echo "::error::Source file list is empty — refusing to apply mirror deletions, this would delete every tracked file." >&2
-            exit 1
-          fi
-
-          if [ -n "$LOCAL_DIR" ]; then
-            git ls-files -- "$LOCAL_DIR" \
-              | sed "s|^$LOCAL_DIR/||" \
-              | { grep -vE '^\.git' || true; } > "$TRACKED_REL"
-          else
-            git ls-files | { grep -vE '^\.git' || true; } > "$TRACKED_REL"
-          fi
-
-          comm -23 <(sort -u "$TRACKED_REL") <(sort -u "$SERVER_FILES") \
-            | while IFS= read -r rel; do
-                [ -z "$rel" ] && continue
-                if [ -n "$LOCAL_DIR" ]; then tracked="$LOCAL_DIR/$rel"; else tracked="$rel"; fi
-                echo "Removing: $tracked"
-                rm -f "$tracked"
-              done
 
       - name: Commit and push
         if: ${{ env.NOTHING_TO_SYNC != 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
         run: |
           set -euo pipefail
+          export LC_ALL=C
 
+          SERVER_FILES="$RUNNER_TEMP/server_files.txt"
+          local_path() { if [ -n "$LOCAL_DIR" ]; then printf '%s/%s' "$LOCAL_DIR" "$1"; else printf '%s' "$1"; fi; }
+
+          # --- Full mirror: delete tracked files the source no longer has ---
+          if [ "$DEPLOY_MIRROR" = "true" ] && [ "$COMMITS_MODE" != "true" ]; then
+            if [ ! -s "$SERVER_FILES" ]; then
+              echo "::error::Source file list is empty — refusing to apply mirror deletions, this would delete every tracked file." >&2
+              exit 1
+            fi
+
+            TRACKED_REL="$RUNNER_TEMP/tracked_rel.txt"
+            if [ -n "$LOCAL_DIR" ]; then
+              git ls-files -- "$LOCAL_DIR" \
+                | sed "s|^$LOCAL_DIR/||" \
+                | { grep -vE '^\.git' || true; } > "$TRACKED_REL"
+            else
+              git ls-files | { grep -vE '^\.git' || true; } > "$TRACKED_REL"
+            fi
+
+            comm -23 <(sort -u "$TRACKED_REL") <(sort -u "$SERVER_FILES") \
+              | while IFS= read -r rel; do
+                  [ -z "$rel" ] && continue
+                  echo "Removing: $(local_path "$rel")"
+                  rm -f "$(local_path "$rel")"
+                done
+          fi
+
+          # --- Sync branch ---
           TIMESTAMP=$(date -u +%Y-%m-%d_%H-%M-%S)
           BRANCH="sync/${REF_NAME_NORM}_${TIMESTAMP}"
 
@@ -1121,40 +1014,39 @@ jobs:
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
           if [ "$COMMITS_MODE" = "true" ] && [ -n "${BASE_COMMIT:-}" ]; then
-            if [ ! -f "$RUNNER_TEMP/server_files.txt" ]; then
+            if [ ! -f "$SERVER_FILES" ]; then
               echo "::error::File list is missing at commit time — the download step did not produce it." >&2
               exit 1
             fi
 
+            # Carry the downloaded files over to a branch cut from the parent of the commits.
             PAYLOAD="$RUNNER_TEMP/payload"
             rm -rf "$PAYLOAD"; mkdir -p "$PAYLOAD"
             while IFS= read -r file; do
               [ -z "$file" ] && continue
-              if [ -n "$LOCAL_DIR" ]; then rel="$LOCAL_DIR/$file"; else rel="$file"; fi
+              rel="$(local_path "$file")"
               [ -f "./$rel" ] || continue
               mkdir -p "$PAYLOAD/$(dirname "$rel")"
               cp "./$rel" "$PAYLOAD/$rel"
-            done < "$RUNNER_TEMP/server_files.txt"
+            done < "$SERVER_FILES"
 
             git checkout -f -B "$BRANCH" "$BASE_COMMIT"
 
-            if [ -d "$PAYLOAD" ]; then
-              (cd "$PAYLOAD" && find . -type f) | while IFS= read -r p; do
-                p="${p#./}"
-                mkdir -p "$(dirname "./$p")"
-                cp "$PAYLOAD/$p" "./$p"
-              done
-            fi
-
+            (cd "$PAYLOAD" && find . -type f) | while IFS= read -r p; do
+              p="${p#./}"
+              mkdir -p "$(dirname "./$p")"
+              cp "$PAYLOAD/$p" "./$p"
+            done
           else
             git checkout -b "$BRANCH"
           fi
 
-          if [ "$COMMITS_MODE" = "true" ] && [ "${DEPLOY_MIRROR}" = "true" ]; then
-            comm -23 <(LC_ALL=C sort -u "$RUNNER_TEMP/commits_original.txt") <(LC_ALL=C sort -u "$RUNNER_TEMP/server_files.txt") \
+          # --- Commits mode + mirror: delete commit files that are gone from the source ---
+          if [ "$COMMITS_MODE" = "true" ] && [ "$DEPLOY_MIRROR" = "true" ]; then
+            comm -23 <(sort -u "$RUNNER_TEMP/commits_original.txt") <(sort -u "$SERVER_FILES") \
               | while IFS= read -r file; do
                   [ -z "$file" ] && continue
-                  if [ -n "$LOCAL_DIR" ]; then lp="./$LOCAL_DIR/$file"; else lp="./$file"; fi
+                  lp="./$(local_path "$file")"
                   if [ -f "$lp" ]; then echo "Removing: $lp"; rm -f "$lp"; fi
                 done
           fi
@@ -1171,7 +1063,7 @@ jobs:
           done
 
           if git diff --cached --quiet; then
-            echo "::warning::No changes detected after download — nothing to commit"
+            echo "::warning::No changes detected after download — nothing to commit."
             exit 0
           fi
 
@@ -1181,18 +1073,15 @@ jobs:
             SOURCE_DESC="server"
           fi
 
-          COMMIT_MSG="sync: import from $SOURCE_DESC $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-          git commit -m "$COMMIT_MSG"
+          git commit -m "sync: import from $SOURCE_DESC $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git push origin "$BRANCH"
 
-          echo "=== Branch pushed: $BRANCH ==="
+          echo "Branch pushed: $BRANCH"
 
-      - name: Cleanup
+      - name: Clean up
         if: always()
-        shell: bash
         run: |
           [ -n "${TMP_KEY:-}" ] && [ -f "$TMP_KEY" ] && rm -f "$TMP_KEY"
-          [ -n "${GT_GIT_CRED:-}" ] && rm -f "$GT_GIT_CRED"
           rm -rf "$RUNNER_TEMP/source"
           rm -f "$RUNNER_TEMP/gt-ssh" "$RUNNER_TEMP/gt-askpass" \
                 "$RUNNER_TEMP/ssh_probe_password.log" "$RUNNER_TEMP/ssh_probe_key.log" \

@@ -3,13 +3,8 @@ __trim() { printf '%s' "${1:-}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/
 __fail() { echo "::error::$1" >&2; exit 1; }
 
 MULTIPLE_PACKAGES="$(__trim "${MULTIPLE_PACKAGES:-}" | tr '[:upper:]' '[:lower:]')"
-__input_env="$(__trim "${INPUT_ENVIRONMENT:-}")"
 
-if [ -n "$__input_env" ]; then
-  REF_BRANCH="$(__slug "$__input_env")"
-  echo "Environment overridden by the workflow_dispatch input."
-
-elif [ -z "${REF_BRANCH:-}" ]; then
+if [ -z "${REF_BRANCH:-}" ]; then
   __found="$(git branch -r --contains "$REF_COMMIT" 2>/dev/null | grep -v HEAD | head -1 | sed 's#.*origin/##' | tr -d '[:space:]' || true)"
   if [ -z "$__found" ]; then
     __fail "Cannot tell which branch tag '$REF_NAME' was cut from: commit $REF_COMMIT is not on any remote branch. Checkout with fetch-depth: 0 is required."
@@ -40,4 +35,4 @@ fi
 echo "REF_BRANCH=$REF_BRANCH" >> "$GITHUB_ENV"
 
 unset -f __slug __trim __fail
-unset __input_env __found __suffix
+unset __found __suffix

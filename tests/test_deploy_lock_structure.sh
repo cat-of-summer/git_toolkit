@@ -34,18 +34,15 @@ before() {
   if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; then pass "«$1» идёт до «$2»"; else fail "«$1» идёт до «$2»" "позиции: '${a:-нет}' и '${b:-нет}'"; fi
 }
 
-before "Keep apt packages for caching" "Install lftp"
-before "Install lftp"                  "Acquire deploy lock"
-before "Strip .git* from deploy lists" "Acquire deploy lock"
-before "Setup SSH auth"                "Acquire deploy lock"
+before "Install system packages"       "Acquire deploy lock"
+before "Resolve deploy files"          "Acquire deploy lock"
+before "Set up SSH access"             "Acquire deploy lock"
 before "Build"                         "Acquire deploy lock"
 before "Acquire deploy lock"           "Before deploy command"
 before "After deploy command"          "Release deploy lock"
-before "Release deploy lock"           "Cleanup"
+before "Release deploy lock"           "Clean up"
 
-DEPLOY_STEPS=("Before deploy command" "FTP deploy (full mirror)" "FTP deploy (selective)" \
-  "RSYNC deploy (full)" "RSYNC deploy (selective)" "GIT deploy" "After deploy command")
-
+DEPLOY_STEPS=("Before deploy command" "Deploy via FTP" "Deploy via rsync" "Deploy via git" "After deploy command")
 for s in "${DEPLOY_STEPS[@]}"; do
   blk="$(step_block "$s")"
   if has "$blk" "^        if: .*env.DEPLOY_SUPERSEDED != 'true'"; then
@@ -60,15 +57,14 @@ for s in "${DEPLOY_STEPS[@]}"; do
   fi
 done
 
-for s in "FTP deploy (full mirror)" "FTP deploy (selective)"; do
-  blk="$(step_block "$s")"
-  if has_f "$blk" "apt-get install"; then fail "«$s» больше не ставит lftp сам"; else pass "«$s» больше не ставит lftp сам"; fi
-  if has_f "$blk" 'FTP deploy is incomplete' && has_f "$blk" 'exit 1'; then
-    pass "«$s» падает, если файлы не залиты после всех попыток"
-  else
-    fail "«$s» падает, если файлы не залиты после всех попыток"
-  fi
-done
+s="Deploy via FTP"
+blk="$(step_block "$s")"
+if has_f "$blk" "apt-get install"; then fail "«$s» больше не ставит lftp сам"; else pass "«$s» больше не ставит lftp сам"; fi
+if has_f "$blk" 'FTP deploy is incomplete' && has_f "$blk" 'exit 1'; then
+  pass "«$s» падает, если файлы не залиты после всех попыток"
+else
+  fail "«$s» падает, если файлы не залиты после всех попыток"
+fi
 
 acq="$(extract_step "$WF" deploy-lock)"
 for want in 'lk_acquire_all' 'lk_release_all' 'LK_SHARED_BASE=' 'lk_check_state' 'lk_heartbeat' 'lk_source_from_ref' \
@@ -88,14 +84,14 @@ else
   fail "Release помечает ok до освобождения"
 fi
 
-cln="$(step_block "Cleanup")"
+cln="$(step_block "Clean up")"
 for want in 'lk_stop_heartbeat' 'lk_mark_state failed running' 'lk_release_all'; do
-  if has_f "$cln" "$want"; then pass "Cleanup вызывает $want"; else fail "Cleanup вызывает $want"; fi
+  if has_f "$cln" "$want"; then pass "Clean up вызывает $want"; else fail "Clean up вызывает $want"; fi
 done
 if awk '/lk_release/{r=NR} /gt-ssh/{g=NR} /TMP_KEY/{k=k?k:NR} END{exit !(r && g && k && r < g && r < k)}' <<< "$cln"; then
-  pass "Cleanup отпускает замок до удаления ключа и SSH-обёртки"
+  pass "Clean up отпускает замок до удаления ключа и SSH-обёртки"
 else
-  fail "Cleanup отпускает замок до удаления ключа и SSH-обёртки"
+  fail "Clean up отпускает замок до удаления ключа и SSH-обёртки"
 fi
 
 env_val() {
