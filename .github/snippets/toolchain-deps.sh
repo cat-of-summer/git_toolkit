@@ -10,7 +10,7 @@ if [ "${RUNNER_OS:-}" = "Linux" ] && command -v apt-get >/dev/null 2>&1; then
         __pkgs+=(build-essential autoconf bison re2c pkg-config
           libxml2-dev libssl-dev libicu-dev libzip-dev libonig-dev libcurl4-openssl-dev
           libpng-dev libjpeg-dev libfreetype-dev libwebp-dev libgmp-dev libsodium-dev
-          libreadline-dev libbz2-dev libsqlite3-dev libpq-dev)
+          libreadline-dev libbz2-dev libsqlite3-dev libpq-dev libgd-dev)
         ;;
     esac
   done
