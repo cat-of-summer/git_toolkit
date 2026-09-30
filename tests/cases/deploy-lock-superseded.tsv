@@ -1,0 +1,21 @@
+# Кто кого считает устаревшим. Запись на сервере оставил прошлый деплой (prev), сейчас приходит cur.
+# Поля записи: repo ; workflow_ref ; environment ; source ; run_number. prev = "-" — записи нет.
+# expect: deploy — выкладываем, skip — пропускаем как устаревший.
+#
+# имя                                         | prev                                                           | cur                                                            | expect
+записи нет                                    | -                                                              | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;5 | deploy
+на сервере более новый запуск                 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;7 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;5 | skip
+тот же номер (re-run)                         | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;5 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;5 | deploy
+на сервере более старый                       | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;3 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;5 | deploy
+номера сравниваются числом, а не строкой      | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;9 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;10 | deploy
+другой репозиторий, номер больше              | o/other;o/other/.github/workflows/ci.yml@refs/heads/main;main;branch:main;900 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;5 | deploy
+тот же репо, другой workflow-файл             | o/app;o/app/.github/workflows/deploy.yml@refs/heads/main;main;branch:main;900 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;5 | deploy
+workflow_ref различается только @ref          | o/app;o/app/.github/workflows/ci.yml@refs/heads/dev;main;branch:main;7 | o/app;o/app/.github/workflows/ci.yml@refs/tags/v1;main;branch:main;5 | skip
+другое окружение                              | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;stage;branch:main;7 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;5 | deploy
+MULTIPLE_PACKAGES: другая ветка-пакет         | o/app;o/app/.github/workflows/ci.yml@refs/heads/api;main;branch:api;7 | o/app;o/app/.github/workflows/ci.yml@refs/heads/web;main;branch:web;5 | deploy
+env из workflow_dispatch, ветки разные        | o/app;o/app/.github/workflows/ci.yml@refs/heads/dev;prod;branch:dev;7 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;prod;branch:main;5 | deploy
+тег и push одной ветки сравниваются           | o/app;o/app/.github/workflows/ci.yml@refs/tags/v2;main;branch:main;7 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;5 | skip
+разные PR                                     | o/app;o/app/.github/workflows/ci.yml@refs/pull/2/merge;main;pr-2;7 | o/app;o/app/.github/workflows/ci.yml@refs/pull/1/merge;main;pr-1;5 | deploy
+тот же PR, опоздавший запуск                  | o/app;o/app/.github/workflows/ci.yml@refs/pull/1/merge;main;pr-1;7 | o/app;o/app/.github/workflows/ci.yml@refs/pull/1/merge;main;pr-1;5 | skip
+номер запуска не число — проверка выключена   | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;7 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;abc | deploy
+испорченная запись на сервере                 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;x7 | o/app;o/app/.github/workflows/ci.yml@refs/heads/main;main;branch:main;5 | deploy

@@ -6,7 +6,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 
 IMAGE=git-toolkit-tests
 ACTIONLINT_IMAGE=rhysd/actionlint:latest
-SUITES="resolve_ref resolve_env action_trigger sync no_stale_refs"
+SUITES="resolve_ref resolve_env action_trigger sync no_stale_refs deploy_lock deploy_lock_structure"
 
 usage() {
   cat <<'USAGE'
@@ -16,7 +16,9 @@ tests/run.sh [--docker|--local] [фильтр]
   --local    прогон здесь же, без контейнера; так же идёт в CI
   фильтр     запустить только наборы, чьё имя содержит подстроку
 
-Наборы: resolve-ref, resolve-env, action-trigger, sync, no-stale-refs.
+Наборы: resolve-ref, resolve-env, action-trigger, sync, no-stale-refs, deploy-lock,
+deploy-lock-structure. Набор deploy-lock-integration (стенд sshd + vsftpd в Docker)
+запускается с хоста без фильтра или по фильтру, совпавшему с его именем.
 Линтеры actionlint и shellcheck запускаются без фильтра и требуют Docker
 (shellcheck берётся с хоста, если он там установлен).
 USAGE
@@ -76,6 +78,13 @@ else
     bash "$file" || status=1
     echo
   done
+fi
+
+int_name=deploy_lock_integration
+if [ ! -f /.dockerenv ] && { [ -z "$FILTER" ] || [ "${int_name#*"${FILTER//-/_}"}" != "$int_name" ]; }; then
+  echo "== deploy-lock-integration =="
+  bash "$HERE/test_deploy_lock_integration.sh" || status=1
+  echo
 fi
 
 run_linters=0

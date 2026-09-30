@@ -1,0 +1,16 @@
+# Что делать, если прошлый деплой того же источника (repo/workflow/env/source) не завершился.
+# prev_status: ok | running (упал вместе с раннером) | failed (шаг упал, Cleanup пометил) | - (записи нет) | none (старая запись без status)
+# prev_run: run_id прошлого деплоя; cur_run: run_id текущего (совпадение = re-run того же запуска).
+# expect: deploy — молча; warn — деплоим с warning; block — падаем (код 3), запись не трогаем.
+#
+# имя                                             | prev_status | prev_run | cur_scope | cur_run | expect
+прошлый успешен, selective                        | ok          | 100      | selective | 101     | deploy
+прошлый успешен, full                             | ok          | 100      | full      | 101     | deploy
+записи нет, selective                             | -           | -        | selective | 101     | deploy
+старая запись без status, selective               | none        | 100      | selective | 101     | deploy
+прошлый упал (failed), selective                  | failed      | 100      | selective | 101     | block
+прошлый умер с раннером (running), selective      | running     | 100      | selective | 101     | block
+прошлый упал, full чинит                          | failed      | 100      | full      | 101     | warn
+прошлый умер с раннером, full чинит               | running     | 100      | full      | 101     | warn
+прошлый упал, деплой только командой (none)       | failed      | 100      | none      | 101     | warn
+re-run упавшего selective-запуска                 | failed      | 100      | selective | 100     | warn

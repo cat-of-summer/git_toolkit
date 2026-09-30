@@ -1,0 +1,34 @@
+name: git-toolkit-deploy-lock
+
+services:
+  sshd:
+    build:
+      context: .
+      dockerfile: sshd.Dockerfile
+    volumes:
+      - keys:/keys
+      - shared:/srv/shared
+
+  ftp:
+    build:
+      context: .
+      dockerfile: ftp.Dockerfile
+    volumes:
+      - shared:/home/ftpu/shared
+
+  runner:
+    build:
+      context: .
+      dockerfile: runner.Dockerfile
+    command: ["sleep", "infinity"]
+    init: true
+    volumes:
+      - ${REPO_DIR:?REPO_DIR is not set}:/repo:ro
+      - keys:/keys:ro
+    depends_on:
+      - sshd
+      - ftp
+
+volumes:
+  keys: {}
+  shared: {}

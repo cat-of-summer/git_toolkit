@@ -1,0 +1,12 @@
+# Источник деплоя (LK_SOURCE) из выхода resolve-ref: с чем сравнивать запуски на устаревание.
+# Запуски с разным источником друг друга не отменяют никогда.
+#
+# имя                                   | REF_TYPE | REF_NAME        | REF_NAME_NORM | REF_BRANCH | expect
+push в ветку                            | branch   | main            | main          | main       | branch:main
+push в ветку со слешем                  | branch   | feature/x       | feature-x     | feature-x  | branch:feature-x
+push при env из workflow_dispatch       | branch   | dev             | dev           | prod       | branch:dev
+тег vX.Y.Z (ветка по истории)           | tag      | v1.2.3          | 1.2.3         | main       | branch:main
+тег {branch}/vX (MULTIPLE_PACKAGES)     | tag      | api/v1.2.3      | api-1.2.3     | api        | branch:api
+тег ветки со слешем (MULTIPLE_PACKAGES) | tag      | feature/x/v1    | feature-x-1   | feature-x  | branch:feature-x
+тег с префиксом при env из dispatch     | tag      | api/v2          | api-2         | prod       | branch:api
+pull request                            | pr       | 42/merge        | pr-42         | main       | pr-42
