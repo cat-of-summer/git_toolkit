@@ -10,18 +10,23 @@ ROOT="$(cd "$HERE/.." && pwd)"
 
 WF="$ROOT/.github/workflows/ci-cd.yml"
 
+# Без конвейеров вида `printf | grep -q`: grep -q выходит на первом совпадении, printf получает
+# SIGPIPE, и при pipefail проверка ложно падает — на Linux это воспроизводится стабильно.
+
 cd_job() { awk '/^  cd:$/{on=1} on && /^  [a-z][a-z0-9_-]*:$/ && !/^  cd:$/{exit} on' "$WF"; }
 CD="$(cd_job)"
 
-step_names() { printf '%s\n' "$CD" | sed -n 's/^      - name: //p'; }
-pos() { step_names | grep -nxF -- "$1" | head -1 | cut -d: -f1; }
+pos() { awk -v want="$1" 'sub(/^      - name: /, "") { n++; if ($0 == want) { print n; exit } }' <<< "$CD"; }
 
 step_block() {
-  printf '%s\n' "$CD" | awk -v want="      - name: $1" '
+  awk -v want="      - name: $1" '
     $0 == want { on = 1; print; next }
     on && /^      - name: / { exit }
-    on { print }'
+    on { print }' <<< "$CD"
 }
+
+has()   { grep -q  -- "$2" <<< "$1"; }
+has_f() { grep -qF -- "$2" <<< "$1"; }
 
 before() {
   local a b
@@ -43,12 +48,12 @@ DEPLOY_STEPS=("Before deploy command" "FTP deploy (full mirror)" "FTP deploy (se
 
 for s in "${DEPLOY_STEPS[@]}"; do
   blk="$(step_block "$s")"
-  if printf '%s\n' "$blk" | grep -q "^        if: .*env.DEPLOY_SUPERSEDED != 'true'"; then
+  if has "$blk" "^        if: .*env.DEPLOY_SUPERSEDED != 'true'"; then
     pass "«$s» пропускается у устаревшего запуска"
   else
-    fail "«$s» пропускается у устаревшего запуска" "$(printf '%s\n' "$blk" | grep '^        if:')"
+    fail "«$s» пропускается у устаревшего запуска" "$(grep '^        if:' <<< "$blk")"
   fi
-  if printf '%s\n' "$blk" | grep -qx "        timeout-minutes: 60"; then
+  if has "$blk" "^        timeout-minutes: 60\$"; then
     pass "«$s» ограничен 60 минутами"
   else
     fail "«$s» ограничен 60 минутами"
@@ -57,8 +62,8 @@ done
 
 for s in "FTP deploy (full mirror)" "FTP deploy (selective)"; do
   blk="$(step_block "$s")"
-  if printf '%s\n' "$blk" | grep -q "apt-get install"; then fail "«$s» больше не ставит lftp сам"; else pass "«$s» больше не ставит lftp сам"; fi
-  if printf '%s\n' "$blk" | grep -q 'FTP deploy is incomplete' && printf '%s\n' "$blk" | grep -q 'exit 1'; then
+  if has_f "$blk" "apt-get install"; then fail "«$s» больше не ставит lftp сам"; else pass "«$s» больше не ставит lftp сам"; fi
+  if has_f "$blk" 'FTP deploy is incomplete' && has_f "$blk" 'exit 1'; then
     pass "«$s» падает, если файлы не залиты после всех попыток"
   else
     fail "«$s» падает, если файлы не залиты после всех попыток"
@@ -66,18 +71,18 @@ for s in "FTP deploy (full mirror)" "FTP deploy (selective)"; do
 done
 
 acq="$(extract_step "$WF" deploy-lock)"
-for want in 'lk_acquire_all' 'lk_release_all' 'LK_SHARED_BASE=' 'lk_check_state' 'lk_heartbeat' 'lk_source_from_ref' 'DEPLOY_SUPERSEDED=' 'LK_HB_PID=' \
-            '# >>> .github/snippets/deploy-lock.sh'; do
-  if printf '%s\n' "$acq" | grep -qF -- "$want"; then pass "Acquire содержит $want"; else fail "Acquire содержит $want"; fi
+for want in 'lk_acquire_all' 'lk_release_all' 'LK_SHARED_BASE=' 'lk_check_state' 'lk_heartbeat' 'lk_source_from_ref' \
+            'DEPLOY_SUPERSEDED=' 'LK_HB_PID=' '# >>> .github/snippets/deploy-lock.sh'; do
+  if has_f "$acq" "$want"; then pass "Acquire содержит $want"; else fail "Acquire содержит $want"; fi
 done
-if printf '%s\n' "$acq" | awk '/lk_check_state/{c=NR} /lk_heartbeat/{h=NR} END{exit !(c && h && c < h)}'; then
+if awk '/lk_check_state/{c=NR} /lk_heartbeat/{h=NR} END{exit !(c && h && c < h)}' <<< "$acq"; then
   pass "пульс стартует только после проверки устаревания"
 else
   fail "пульс стартует только после проверки устаревания"
 fi
 
 rel="$(step_block "Release deploy lock")"
-if printf '%s\n' "$rel" | awk '/lk_mark_state ok/{m=NR} /lk_release_all/{r=NR} END{exit !(m && r && m < r)}'; then
+if awk '/lk_mark_state ok/{m=NR} /lk_release_all/{r=NR} END{exit !(m && r && m < r)}' <<< "$rel"; then
   pass "Release помечает ok до освобождения"
 else
   fail "Release помечает ok до освобождения"
@@ -85,15 +90,17 @@ fi
 
 cln="$(step_block "Cleanup")"
 for want in 'lk_stop_heartbeat' 'lk_mark_state failed running' 'lk_release_all'; do
-  if printf '%s\n' "$cln" | grep -qF -- "$want"; then pass "Cleanup вызывает $want"; else fail "Cleanup вызывает $want"; fi
+  if has_f "$cln" "$want"; then pass "Cleanup вызывает $want"; else fail "Cleanup вызывает $want"; fi
 done
-if printf '%s\n' "$cln" | awk '/lk_release/{r=NR} /gt-ssh/{g=NR} /TMP_KEY/{k=k?k:NR} END{exit !(r && g && k && r < g && r < k)}'; then
+if awk '/lk_release/{r=NR} /gt-ssh/{g=NR} /TMP_KEY/{k=k?k:NR} END{exit !(r && g && k && r < g && r < k)}' <<< "$cln"; then
   pass "Cleanup отпускает замок до удаления ключа и SSH-обёртки"
 else
   fail "Cleanup отпускает замок до удаления ключа и SSH-обёртки"
 fi
 
-env_val() { printf '%s\n' "$CD" | sed -n "s/^      $1: '\\{0,1\\}\\([0-9]*\\)'\\{0,1\\}\$/\\1/p" | head -1; }
+env_val() {
+  awk -v k="      $1: " 'index($0, k) == 1 { v = substr($0, length(k) + 1); gsub(/\047/, "", v); print v; exit }' <<< "$CD"
+}
 beat="$(env_val LK_BEAT)"; stale="$(env_val LK_STALE)"; hold="$(env_val LK_MAX_HOLD)"; wait_s="$(env_val LK_WAIT)"
 held_steps=3
 if [ -n "$hold" ] && [ "$hold" -gt $(( held_steps * 60 * 60 )) ]; then
@@ -109,7 +116,7 @@ else
 fi
 
 for v in DEPLOY_LOCK_DIR LK_TRANSPORT LK_REPO LK_WORKFLOW LK_ENVIRONMENT LK_RUN_ID LK_RUN_NUMBER LK_RUN_URL LK_COMMIT LK_SCOPE LK_SSH_TARGET LK_FTP_PASS; do
-  if printf '%s\n' "$CD" | grep -q "^      $v: "; then pass "env джобы cd задаёт $v"; else fail "env джобы cd задаёт $v"; fi
+  if has "$CD" "^      $v: "; then pass "env джобы cd задаёт $v"; else fail "env джобы cd задаёт $v"; fi
 done
 
 suite_result "deploy-lock-structure"

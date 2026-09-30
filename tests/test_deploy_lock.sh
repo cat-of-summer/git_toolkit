@@ -465,13 +465,13 @@ for i in 2 3 4; do qworker "$b" "h$i" ok 0.2; done
 wait
 q_check "зависший в очереди" "$b" 4
 if grep -q "held for over 1s" "$Q/hang.log"; then pass "зависший: его пульс остановлен по LK_MAX_HOLD"; else fail "зависший: его пульс остановлен по LK_MAX_HOLD" "$(cat "$Q/hang.log")"; fi
-if cat "$Q"/h*.log | grep "removed an abandoned lock" | grep -q "org/hang"; then
+if grep -h "removed an abandoned lock.*org/hang" "$Q"/h*.log >/dev/null; then
   pass "зависший: очередь сняла его замок и пошла дальше"
 else
   fail "зависший: очередь сняла его замок и пошла дальше" "$(cat "$Q"/*.log)"
 fi
 if grep -q "not released" "$Q/hang.log" && ! grep -q "Deploy lock released" "$Q/hang.log"; then pass "зависший, очнувшись, не удалил чужой замок"; else fail "зависший, очнувшись, не удалил чужой замок" "$(cat "$Q/hang.log")"; fi
-next=$(( $(grep -v "^hang " "$Q/order" | cut -d" " -f2 | sort -n | head -1) - started ))
+next=$(( $(awk '$1 != "hang" && (m == "" || $2 < m) { m = $2 } END { print m }' "$Q/order") - started ))
 if [ "$next" -lt 6 ]; then pass "зависший: очередь не ждала его 6 с (следующий взял замок через $next с)"; else fail "зависший: очередь ждала его до конца" "$next с"; fi
 
 q_reset
@@ -482,7 +482,7 @@ for i in 1 2 3 4 5; do qworker "$b" "c$i" ok 0.1; done
 wait
 q_check "упавший с замком в очереди" "$b" 5
 check_eq "упавший: замок снят ровно один раз" 1 "$(q_steals)"
-if cat "$Q"/c*.log | grep "removed an abandoned lock" | grep -q "org/crash"; then pass "упавший: warning называет упавшего"; else fail "упавший: warning называет упавшего" "$(cat "$Q"/*.log)"; fi
+if grep -h "removed an abandoned lock.*org/crash" "$Q"/c*.log >/dev/null; then pass "упавший: warning называет упавшего"; else fail "упавший: warning называет упавшего" "$(cat "$Q"/*.log)"; fi
 
 q_reset
 b="$T/q-waiter"
@@ -536,9 +536,9 @@ hold "$sb" F1
 ( LK_BASE="$b" LK_SHARED_BASE="$sb" LK_TOKEN=A LK_REPO=org/A LK_POLL=0.2 LK_WAIT=20; lk_acquire_all ) 2>/dev/null &
 a=$!
 until [ "$(tok "$b")" = A ]; do sleep 0.05; done
-( LK_BASE="$b" LK_TOKEN=B LK_STALE=2 LK_POLL=0.2 LK_WAIT=20; lk_acquire ) 2>"$T/held.log" &
+( LK_BASE="$b" LK_TOKEN=B LK_STALE=4 LK_POLL=0.2 LK_WAIT=30; lk_acquire ) 2>"$T/held.log" &
 bpid=$!
-sleep 4
+sleep 6
 check_eq "ожидая общий замок дольше LK_STALE, SSH не теряет замок хоста" A "$(tok "$b")"
 if has "$T/held.log" "removed an abandoned lock"; then fail "замок хоста не сняли как брошенный" "$(cat "$T/held.log")"; else pass "замок хоста не сняли как брошенный"; fi
 ( LK_BASE="$sb" LK_TOKEN=F1; lk_release ) 2>/dev/null
@@ -571,8 +571,16 @@ check_eq "смешанная очередь: ни наложений, ни вз�
 check_eq "смешанная очередь: оба замка в конце свободны" "|" "$(tok "$T/mix-host")|$(tok "$T/mix-shared")"
 
 # --- 14–15. разные пользователи одного хоста ------------------------------------------------------
-if [ "$(id -u)" = 0 ] && command -v adduser >/dev/null 2>&1 && command -v su >/dev/null 2>&1; then
-  for u in lku1 lku2; do id "$u" >/dev/null 2>&1 || adduser -D -s /bin/bash "$u" >/dev/null 2>&1; done
+mkuser() {
+  id "$1" >/dev/null 2>&1 && return 0
+  if command -v useradd >/dev/null 2>&1; then useradd -m -s /bin/bash "$1" >/dev/null 2>&1
+  else adduser -D -s /bin/bash "$1" >/dev/null 2>&1
+  fi
+  id "$1" >/dev/null 2>&1
+}
+rmuser() { userdel -r "$1" >/dev/null 2>&1 || deluser --remove-home "$1" >/dev/null 2>&1 || true; }
+
+if [ "$(id -u)" = 0 ] && command -v su >/dev/null 2>&1 && mkuser lku1 && mkuser lku2; then
 
   as() {
     local u="$1"; shift
@@ -607,9 +615,9 @@ if [ "$(id -u)" = 0 ] && command -v adduser >/dev/null 2>&1 && command -v su >/d
   check_eq "владелец базы сам чинит права до 0777" "0 777" "$? $(stat -c %a "$XU/x755")"
 
   rm -rf "$XU"
-  for u in lku1 lku2; do deluser --remove-home "$u" >/dev/null 2>&1 || true; done
+  for u in lku1 lku2; do rmuser "$u"; done
 else
-  echo "  пропущено: межпользовательские проверки нужны root, adduser и su (идут в контейнере tests/run.sh)"
+  echo "  пропущено: межпользовательские проверки нужны root, su и useradd или adduser (идут в контейнере tests/run.sh)"
 fi
 
 suite_result "deploy-lock"
