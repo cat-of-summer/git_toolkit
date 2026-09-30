@@ -8,5 +8,6 @@
 - [resolve-env.sh](resolve-env.sh.md)
 - [resolve-ref.sh](resolve-ref.sh.md)
 - [ssh-auth.sh](ssh-auth.sh.md)
+- [toolchain-deps.sh](toolchain-deps.sh.md)
 
 <!-- DOCGEN:END -->
