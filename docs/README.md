@@ -96,6 +96,10 @@ BUILD_COMMAND=docker build -t myapp:$REF_NAME_NORM .
 а в YAML лежат его копии между маркерами `# >>> ` и `# <<< `. После правки сниппета копии
 перевстраиваются `tests/sync.sh --write`; расхождение ловит тест.
 
+Так же устроены и остальные общие куски: `deploy-lock.sh` (очередь деплоя), `ssh-auth.sh`
+(вход на сервер ключом или паролем, общий для ci-cd и grabber) и `apt-install.sh` (установка
+`lftp` / `sshpass` из общего apt-кэша).
+
 ## Тесты
 
 ```bash
