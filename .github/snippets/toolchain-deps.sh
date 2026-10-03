@@ -11,6 +11,14 @@ if [ "${RUNNER_OS:-}" = "Linux" ] && command -v apt-get >/dev/null 2>&1; then
           libxml2-dev libssl-dev libicu-dev libzip-dev libonig-dev libcurl4-openssl-dev
           libpng-dev libjpeg-dev libfreetype-dev libwebp-dev libgmp-dev libsodium-dev
           libreadline-dev libbz2-dev libsqlite3-dev libpq-dev libgd-dev)
+        # mise builds PHP with vfox-php, which passes --with-sodium only on macOS: on Linux
+        # libsodium-dev alone leaves PHP without the sodium extension. The flag goes into
+        # PHP_EXTRA_CONFIGURE_OPTIONS, which vfox-php appends to its own options;
+        # PHP_CONFIGURE_OPTIONS would replace them all (mbstring, intl, gd would be gone).
+        case " ${PHP_EXTRA_CONFIGURE_OPTIONS:-} " in
+          *" --with-sodium"*) ;;
+          *) export PHP_EXTRA_CONFIGURE_OPTIONS="${PHP_EXTRA_CONFIGURE_OPTIONS:+$PHP_EXTRA_CONFIGURE_OPTIONS }--with-sodium" ;;
+        esac
         ;;
     esac
   done

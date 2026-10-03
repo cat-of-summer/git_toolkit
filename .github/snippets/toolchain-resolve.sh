@@ -46,6 +46,10 @@ MISE_DIR="$(printf '%s' "$MISE_DIR" | tr '\\' '/')"
 
 # The key is shared by every job that installs the toolchain; keep its format stable,
 # or caches already saved on the default branch stop matching.
-TOOLCHAIN_KEY="mise-${RUNNER_OS}-${RUNNER_ARCH}-${MISE_FILES_HASH:-}-${TOOLS}"
+# TOOLCHAIN_BUILD is bumped when the way tools are built changes (toolchain-deps.sh: system
+# libraries, configure options): a cached build made the old way would be restored and never
+# rebuilt. 2 — PHP with sodium.
+TOOLCHAIN_BUILD=2
+TOOLCHAIN_KEY="mise-${RUNNER_OS}-${RUNNER_ARCH}-b${TOOLCHAIN_BUILD}-${MISE_FILES_HASH:-}-${TOOLS}"
 
-unset __backends __item __prefix __rest __after __ver __name
+unset __backends __item __prefix __rest __after __ver __name TOOLCHAIN_BUILD
