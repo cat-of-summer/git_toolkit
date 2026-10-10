@@ -315,7 +315,8 @@ while IFS='|' read -r name pstatus prun scope crun expect; do
       { printf 'run_number=5\nrun_id=%s\ntoken=OLD\ncommit=0ld0ld0\nrun_url=https://gh/runs/5\n' "$prun"
         [ "$pstatus" = none ] || printf 'status=%s\n' "$pstatus"; } | lkt_write "state/$(lk_state_key)"
     fi
-    LK_RUN_NUMBER=6 LK_RUN_ID="$crun" LK_SCOPE="$scope" LK_TOKEN=NEW
+    LK_RUN_NUMBER=6 LK_RUN_ID="$crun" LK_SCOPE="$scope" LK_TOKEN=NEW LK_DELTA=false
+    [ "$scope" = delta ] && { LK_SCOPE=selective; LK_DELTA=true; }
     rc=0; lk_check_state 2>"$T/st.log" || rc=$?
     rec="$(lkt_read "state/$(lk_state_key)")"
     printf '%s|%s|%s|%s' "$rc" "$(lk_field token "$rec")" "$(lk_field status "$rec")" \
@@ -361,6 +362,54 @@ check_eq "чужой token не меняет запись" ok "$(lk_field status
   LK_RUN_NUMBER=7 LK_RUN_ID=r7 LK_TOKEN=t7; lk_check_state ) 2>/dev/null
 check_eq "устаревший запуск не трогает пометку failed" "failed t9" \
   "$(lk_field status "$(cat "$b"/state/*)") $(lk_field token "$(cat "$b"/state/*)")"
+
+# --- deployed: база дельты, таблица кейсов ---------------------------------------------------------
+i=0
+while IFS='|' read -r name prev cur run action base after; do
+  name="$(trim "$name")"
+  [ -z "$name" ] && continue
+  case "$name" in \#*) continue ;; esac
+  prev="$(trim "$prev")"; cur="$(trim "$cur")"; run="$(trim "$run")"; action="$(trim "$action")"
+  base="$(trim "$base")"; after="$(trim "$after")"
+  [ "$base" = "-" ] && base=""
+  i=$(( i + 1 ))
+  b="$T/dp$i"
+  got="$(
+    LK_BASE="$b"; st_env; lkt_ensure_base
+    if [ "$prev" != "-" ]; then
+      IFS=';' read -r pst psc pco pde <<< "$prev"
+      { printf 'run_number=5\nrun_id=r5\ntoken=OLD\nstatus=%s\nscope=%s\ncommit=%s\n' "$pst" "$psc" "$pco"
+        [ "$pde" = "~" ] || printf 'deployed=%s\n' "$pde"; } | lkt_write "state/$(lk_state_key)"
+    fi
+    LK_SCOPE="$cur" LK_DELTA=false
+    [ "$cur" = delta ] && { LK_SCOPE=selective; LK_DELTA=true; }
+    LK_RUN_NUMBER=6 LK_RUN_ID=r6 LK_TOKEN=NEW LK_COMMIT=C
+    [ "$run" = same ] && LK_RUN_ID=r5
+    lk_check_state 2>/dev/null || exit 9
+    case "$action" in
+      ok)     lk_mark_state ok ;;
+      failed) lk_mark_state failed running ;;
+    esac
+    printf '%s|%s' "$LK_DEPLOY_BASE" "$(lk_field deployed "$(lkt_read "state/$(lk_state_key)")")"
+  )"
+  check_eq "deployed: $name" "$base|$after" "$got"
+done < "$HERE/cases/deploy-lock-deployed.tsv"
+
+# Гонка двух push с DEPLOY_LAST_COMMITS: #11 взял замок раньше #10. Дельта #11 считается от
+# последнего выложенного коммита X и уже содержит изменения #10, поэтому пропуск #10 ничего не теряет.
+b="$T/race"
+got="$(
+  LK_BASE="$b"; st_env; lkt_ensure_base
+  LK_SCOPE=full LK_DELTA=false LK_RUN_NUMBER=9 LK_RUN_ID=r9 LK_TOKEN=t9 LK_COMMIT=X
+  lk_check_state; lk_mark_state ok
+  LK_SCOPE=selective LK_DELTA=true
+  LK_RUN_NUMBER=11 LK_RUN_ID=r11 LK_TOKEN=t11 LK_COMMIT=C11
+  lk_check_state; base11="$LK_DEPLOY_BASE"; lk_mark_state ok
+  LK_RUN_NUMBER=10 LK_RUN_ID=r10 LK_TOKEN=t10 LK_COMMIT=C10
+  lk_check_state
+  printf '%s %s %s' "$base11" "$LK_SUPERSEDED" "$(lk_field deployed "$(lkt_read "state/$(lk_state_key)")")"
+)" 2>/dev/null
+check_eq "гонка delta: #11 считает от X, #10 пропущен, на сервере C11" "X true C11" "$got"
 
 # --- источник деплоя из resolve-ref ----------------------------------------------------------------
 while IFS='|' read -r name rtype rname rnorm rbranch expect; do

@@ -250,6 +250,7 @@ jobs:
       publish_method: ${{ steps.decide.outputs.publish_method }}
       deploy_method: ${{ steps.decide.outputs.deploy_method }}
       deploy_mirror: ${{ steps.decide.outputs.deploy_mirror }}
+      delta: ${{ steps.decide.outputs.delta }}
       apt_packages: ${{ steps.decide.outputs.apt_packages }}
 
     env:
@@ -261,7 +262,7 @@ jobs:
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
       DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
       DEPLOY_METHOD: ${{ vars.DEPLOY_METHOD || 'command' }}
-      DEPLOY_MIRROR: ${{ (inputs.deploy_mirror != 'default' && inputs.deploy_mirror) || vars.DEPLOY_MIRROR || 'false' }}
+      DEPLOY_MIRROR: ${{ (inputs.deploy_mirror != 'default' && inputs.deploy_mirror) || vars.DEPLOY_MIRROR || 'true' }}
       DEPLOY_LAST_COMMITS: ${{ vars.DEPLOY_LAST_COMMITS || 'false' }}
 
     steps:
@@ -274,7 +275,6 @@ jobs:
           REF_NAME: ${{ needs.resolve-ref.outputs.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           INPUT_COMMITS: ${{ inputs.commits }}
-          PUSH_COMMITS: ${{ join(github.event.commits.*.id, ',') }}
           RUNS_ON: ${{ vars.RUNS_ON }}
           PUBLISH_METHOD: ${{ vars.PUBLISH_METHOD }}
         run: |
@@ -346,6 +346,7 @@ jobs:
 
           SCOPE=""
           COMMITS=""
+          DELTA=false
           APT_PACKAGES=""
           if [ "$RUN_CD" = "true" ]; then
             case "$DEPLOY_METHOD" in
@@ -356,6 +357,9 @@ jobs:
               false|true|full) ;;
               *) fail "Invalid DEPLOY_MIRROR='$DEPLOY_MIRROR'. Allowed: false | true | full." ;;
             esac
+            if [ "$ACTION_TRIGGER" = "tag" ] && [ "$DEPLOY_LAST_COMMITS" = "true" ]; then
+              fail "DEPLOY_LAST_COMMITS=true has no effect with ACTION_TRIGGER=tag: a tag is always deployed in full. Remove DEPLOY_LAST_COMMITS, or use ACTION_TRIGGER=push to deploy branch pushes selectively and tags in full."
+            fi
 
             if [ "$DEPLOY_METHOD" = "command" ]; then
               SCOPE="none"
@@ -369,7 +373,9 @@ jobs:
               SCOPE="full"
             elif [ "$EVENT" = "push" ]; then
               if [ "$DEPLOY_LAST_COMMITS" = "true" ]; then
-                SCOPE="selective"; COMMITS="$PUSH_COMMITS"
+                # The changes since the last successful deploy, not the commits of this push:
+                # a push that lost the race for the lock and is skipped as outdated leaves no gap.
+                SCOPE="selective"; DELTA=true
               else
                 SCOPE="full"
               fi
@@ -418,7 +424,7 @@ jobs:
 
           echo "ACTION_TRIGGER=$ACTION_TRIGGER event=$EVENT ref_type=$REF_TYPE ref_name_norm=$REF_NAME_NORM active=$ACTIVE pr=$PR"
           echo "run_ci=$RUN_CI run_release=$RUN_RELEASE run_cd=$RUN_CD warm_cache=$WARM_CACHE"
-          echo "method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR scope=$SCOPE commits='$COMMITS' os=$OS_JSON publish=${PUBLISH_METHOD:-<none>} apt=${APT_PACKAGES:-<none>}"
+          echo "method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR scope=$SCOPE delta=$DELTA commits='$COMMITS' os=$OS_JSON publish=${PUBLISH_METHOD:-<none>} apt=${APT_PACKAGES:-<none>}"
           {
             echo "run_ci=$RUN_CI"
             echo "warm_cache=$WARM_CACHE"
@@ -430,6 +436,7 @@ jobs:
             echo "publish_method=${PUBLISH_METHOD:-}"
             echo "deploy_method=$DEPLOY_METHOD"
             echo "deploy_mirror=$DEPLOY_MIRROR"
+            echo "delta=$DELTA"
             echo "apt_packages=$APT_PACKAGES"
           } >> "$GITHUB_OUTPUT"
 
@@ -1383,6 +1390,7 @@ jobs:
       LK_DEPLOY_USER: ${{ vars.DEPLOY_USER }}
       LK_METHOD: ${{ needs.resolve-config.outputs.deploy_method }}
       LK_SCOPE: ${{ needs.resolve-config.outputs.scope }}
+      LK_DELTA: ${{ needs.resolve-config.outputs.delta }}
       DEPLOY_LOCK_DIR: ${{ vars.DEPLOY_LOCK_DIR }}
 
     steps:
@@ -1627,15 +1635,15 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Resolve deploy files
+      - name: Resolve target commit
         if: ${{ env.SCOPE == 'selective' }}
         run: |
           set -euo pipefail
 
-          # --- Target commit: the newest of COMMITS, checked out for the build ---
-          if [ -z "$COMMITS" ]; then
-            TARGET_COMMIT=$(git rev-parse HEAD)
-            echo "No commits specified — TARGET_COMMIT = HEAD = $TARGET_COMMIT"
+          # --- Target commit: checked out for the build; the file lists are built under the lock ---
+          if [ "${LK_DELTA:-}" = "true" ]; then
+            TARGET_COMMIT="$REF_COMMIT"
+            echo "Delta deploy — TARGET_COMMIT = pushed commit = $TARGET_COMMIT"
           else
             readarray -t COMMITS_ARR < <(echo "$COMMITS" | tr ',; \t\r\n' '\n' | tr -s '\n' | grep -v '^[[:space:]]*$')
 
@@ -1664,69 +1672,6 @@ jobs:
             echo "Checking out TARGET_COMMIT (HEAD was $HEAD_COMMIT)"
             git checkout --force --detach "$TARGET_COMMIT"
           fi
-
-          # --- Upload / delete lists ---
-          UPLOAD_FILE="$RUNNER_TEMP/files_upload.txt"
-          DELETE_FILE="$RUNNER_TEMP/files_delete.txt"
-          ALL_FILES="$RUNNER_TEMP/all_files.txt"
-          : > "$UPLOAD_FILE"
-          : > "$DELETE_FILE"
-          : > "$ALL_FILES"
-
-          LOCAL_DIR="${DEPLOY_LOCAL_DIR%/}"
-          LOCAL_DIR="${LOCAL_DIR#./}"
-          [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
-
-          if [ -z "$COMMITS" ]; then
-            echo "=== No commits: collecting all paths ever touched in history ==="
-            git log --pretty=format: --name-only | grep -v '^$' | sort -u > "$ALL_FILES" || true
-          else
-            for commit in "${COMMITS_ARR[@]}"; do
-              commit="${commit// /}"
-              [ -z "$commit" ] && continue
-              echo "=== Commit $commit ==="
-              git diff-tree --no-commit-id -r --name-only "$commit" >> "$ALL_FILES"
-            done
-            sort -u -o "$ALL_FILES" "$ALL_FILES"
-          fi
-
-          echo "Candidate files: $(wc -l < "$ALL_FILES")"
-
-          while IFS= read -r file; do
-            [ -z "$file" ] && continue
-            if [ -n "$LOCAL_DIR" ]; then
-              [[ "$file" == "$LOCAL_DIR/"* ]] || continue
-              rel="${file#"$LOCAL_DIR/"}"
-            else
-              rel="$file"
-            fi
-
-            if git cat-file -e "$TARGET_COMMIT:$file" 2>/dev/null; then
-              echo "$rel" >> "$UPLOAD_FILE"
-            else
-              if [ "${DEPLOY_MIRROR}" = "true" ] || [ "${DEPLOY_MIRROR}" = "full" ]; then
-                echo "$rel" >> "$DELETE_FILE"
-              fi
-            fi
-          done < "$ALL_FILES"
-
-          # Never ship git metadata; with a mirror, .gitignore & co. are regular files.
-          if [ "$DEPLOY_MIRROR" = "false" ]; then
-            PAT='^\.git'
-          else
-            PAT='^\.git(/|$)|^\.github(/|$)'
-          fi
-          for f in "$UPLOAD_FILE" "$DELETE_FILE"; do
-            { grep -vE "$PAT" "$f" || true; } | sort -u > "$f.tmp"
-            mv "$f.tmp" "$f"
-          done
-
-          if ! [ -s "$UPLOAD_FILE" ] && ! [ -s "$DELETE_FILE" ]; then
-            echo "::warning::No files match DEPLOY_LOCAL_DIR='${DEPLOY_LOCAL_DIR}'."
-          fi
-
-          echo "Files to upload: $(wc -l < "$UPLOAD_FILE")"
-          echo "Files to delete: $(wc -l < "$DELETE_FILE")"
 
       - name: Download workspace
         id: workspace
@@ -2020,6 +1965,7 @@ jobs:
           LK_TOKEN="${LK_TOKEN:-}"
           LK_SHARED_BASE="${LK_SHARED_BASE:-}"
           LK_SUPERSEDED="${LK_SUPERSEDED:-false}"
+          LK_DEPLOY_BASE="${LK_DEPLOY_BASE:-}"
 
           lk_now()   { date +%s; }
           lk_sleep() { sleep "$1"; }
@@ -2429,11 +2375,23 @@ jobs:
             printf 'at=%s\n'          "$(lk_now)"
             printf 'token=%s\n'       "$LK_TOKEN"
             printf 'status=%s\n'      "$1"
+            printf 'deployed=%s\n'    "$(lk__clean "${2:-}")"
+          }
+
+          # Commit whose whole tree is on the server: written by a successful full or delta deploy and
+          # carried over by every other record. Records without the field: a successful full deploy counts.
+          lk__deployed_of() {
+            local rec="$1" d
+            if d="$(lk_field deployed "$rec")"; then printf '%s' "$d"; return 0; fi
+            if [ "$(lk_field status "$rec" || true)" = ok ] && [ "$(lk_field scope "$rec" || true)" = full ]; then
+              lk_field commit "$rec" || true
+            fi
           }
 
           lk_check_state() {
-            local key rec prev status prev_id what
+            local key rec prev status prev_id what deployed
             LK_SUPERSEDED=false
+            LK_DEPLOY_BASE=""
             case "${LK_RUN_NUMBER:-}" in ''|*[!0-9]*) return 0 ;; esac
             key="$(lk_state_key)"
             rec="$(lkt_read "state/$key" || true)"
@@ -2447,10 +2405,15 @@ jobs:
 
             status="$(lk_field status "$rec" || true)"
             prev_id="$(lk_field run_id "$rec" || true)"
+            deployed="$(lk__deployed_of "$rec")"
+            [ "${LK_DELTA:-}" = true ] && LK_DEPLOY_BASE="$deployed"
             if [ "$status" = running ] || [ "$status" = failed ]; then
               what="the previous deploy #${prev:-?} ($(lk_field run_url "$rec" || true), commit $(lk_field commit "$rec" | cut -c1-7)) did not complete (status: $status)"
               if [ -n "$prev_id" ] && [ "$prev_id" = "${LK_RUN_ID:-}" ]; then
                 lk_log "::warning::Deploy lock: $what — this is a re-run of it, deploying the same changes again."
+              elif [ "${LK_DELTA:-}" = true ]; then
+                LK_DEPLOY_BASE=""
+                lk_log "::warning::Deploy lock: $what — it may have left part of its files on the server, so this deploy uploads all tracked files instead of the changes since the last successful deploy."
               elif [ "${LK_SCOPE:-}" = selective ]; then
                 echo "::error::Deploy lock: $what. A selective deploy uploads only its own commits and would leave the gaps of that run on the server. Run a full deploy once: workflow_dispatch without 'commits' (or a push with DEPLOY_LAST_COMMITS=false)." >&2
                 return 3
@@ -2459,18 +2422,22 @@ jobs:
               fi
             fi
 
-            lk__state_text running | lkt_write "state/$key"
+            lk__state_text running "$deployed" | lkt_write "state/$key"
           }
 
           lk_mark_state() {
-            local want="$1" only_if="${2:-}" key rec
+            local want="$1" only_if="${2:-}" key rec deployed
             case "${LK_RUN_NUMBER:-}" in ''|*[!0-9]*) return 0 ;; esac
             [ -n "$LK_TOKEN" ] || return 0
             key="$(lk_state_key)"
             rec="$(lkt_read "state/$key" || true)"
             [ "$(lk_field token "$rec" || true)" = "$LK_TOKEN" ] || return 0
             if [ -n "$only_if" ] && [ "$(lk_field status "$rec" || true)" != "$only_if" ]; then return 0; fi
-            lk__state_text "$want" | lkt_write "state/$key"
+            deployed="$(lk_field deployed "$rec" || true)"
+            if [ "$want" = ok ] && { [ "${LK_SCOPE:-}" = full ] || [ "${LK_DELTA:-}" = true ]; }; then
+              deployed="${LK_COMMIT:-}"
+            fi
+            lk__state_text "$want" "$deployed" | lkt_write "state/$key"
           }
 
           lk_stop_heartbeat() {
@@ -2519,9 +2486,98 @@ jobs:
             echo "LK_TOKEN=" >> "$GITHUB_ENV"
             exit "$rc"
           fi
+          echo "DEPLOY_BASE=$LK_DEPLOY_BASE" >> "$GITHUB_ENV"
 
           nohup setsid bash -c '. "$LK_LIB"; lk_heartbeat' >> "$RUNNER_TEMP/deploy_lock_heartbeat.log" 2>&1 < /dev/null &
           echo "LK_HB_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Resolve deploy files
+        id: deploy-files
+        if: ${{ env.SCOPE == 'selective' && env.DEPLOY_SUPERSEDED != 'true' }}
+        run: |
+          set -euo pipefail
+
+          UPLOAD_FILE="$RUNNER_TEMP/files_upload.txt"
+          DELETE_FILE="$RUNNER_TEMP/files_delete.txt"
+          ALL_FILES="$RUNNER_TEMP/all_files.txt"
+          : > "$UPLOAD_FILE"
+          : > "$DELETE_FILE"
+          : > "$ALL_FILES"
+
+          LOCAL_DIR="${DEPLOY_LOCAL_DIR%/}"
+          LOCAL_DIR="${LOCAL_DIR#./}"
+          [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
+
+          all_history() {
+            git log --pretty=format: --name-only "$TARGET_COMMIT" | grep -v '^$' | sort -u > "$ALL_FILES" || true
+          }
+
+          if [ "${LK_DELTA:-}" = "true" ]; then
+            # DEPLOY_BASE: the last commit whose tree reached the server, from the record under the lock.
+            BASE="${DEPLOY_BASE:-}"
+            if [ -n "$BASE" ] && ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+              echo "Last deployed commit $BASE is not reachable from any branch or tag — fetching by SHA"
+              if ! { git fetch --quiet origin "$BASE" 2>/dev/null && git cat-file -e "${BASE}^{commit}" 2>/dev/null; }; then
+                echo "::warning::The last deployed commit $BASE is no longer in $GITHUB_REPOSITORY (force-push or a deleted branch) — uploading all tracked files instead of the changes since it."
+                BASE=""
+              fi
+            fi
+            if [ -n "$BASE" ]; then
+              echo "=== Changes since the last deployed commit $BASE ==="
+              git diff --name-only --no-renames "$BASE" "$TARGET_COMMIT" | sort -u > "$ALL_FILES"
+            else
+              echo "=== No usable record of the last deployed commit: collecting all paths ever touched in history ==="
+              all_history
+            fi
+          else
+            readarray -t COMMITS_ARR < <(echo "$COMMITS" | tr ',; \t\r\n' '\n' | tr -s '\n' | grep -v '^[[:space:]]*$')
+            for commit in "${COMMITS_ARR[@]}"; do
+              echo "=== Commit $commit ==="
+              # --first-parent: a merge commit brings everything it merged in.
+              git diff-tree --no-commit-id -r --root -m --first-parent --name-only "$commit" >> "$ALL_FILES"
+            done
+            sort -u -o "$ALL_FILES" "$ALL_FILES"
+          fi
+
+          echo "Candidate files: $(wc -l < "$ALL_FILES")"
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            if [ -n "$LOCAL_DIR" ]; then
+              [[ "$file" == "$LOCAL_DIR/"* ]] || continue
+              rel="${file#"$LOCAL_DIR/"}"
+            else
+              rel="$file"
+            fi
+
+            if git cat-file -e "$TARGET_COMMIT:$file" 2>/dev/null; then
+              echo "$rel" >> "$UPLOAD_FILE"
+            else
+              if [ "${DEPLOY_MIRROR}" = "true" ] || [ "${DEPLOY_MIRROR}" = "full" ]; then
+                echo "$rel" >> "$DELETE_FILE"
+              fi
+            fi
+          done < "$ALL_FILES"
+
+          # Never ship git metadata; with a mirror, .gitignore & co. are regular files.
+          if [ "$DEPLOY_MIRROR" = "false" ]; then
+            PAT='^\.git'
+          else
+            PAT='^\.git(/|$)|^\.github(/|$)'
+          fi
+          for f in "$UPLOAD_FILE" "$DELETE_FILE"; do
+            { grep -vE "$PAT" "$f" || true; } | sort -u > "$f.tmp"
+            mv "$f.tmp" "$f"
+          done
+
+          if ! [ -s "$ALL_FILES" ]; then
+            echo "No changes to deploy."
+          elif ! [ -s "$UPLOAD_FILE" ] && ! [ -s "$DELETE_FILE" ]; then
+            echo "::warning::No files match DEPLOY_LOCAL_DIR='${DEPLOY_LOCAL_DIR}'."
+          fi
+
+          echo "Files to upload: $(wc -l < "$UPLOAD_FILE")"
+          echo "Files to delete: $(wc -l < "$DELETE_FILE")"
 
       - name: Before deploy command
         id: before-deploy

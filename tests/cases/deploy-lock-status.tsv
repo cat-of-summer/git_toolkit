@@ -14,3 +14,6 @@
 прошлый умер с раннером, full чинит               | running     | 100      | full      | 101     | warn
 прошлый упал, деплой только командой (none)       | failed      | 100      | none      | 101     | warn
 re-run упавшего selective-запуска                 | failed      | 100      | selective | 100     | warn
+прошлый упал, delta заливает все файлы            | failed      | 100      | delta     | 101     | warn
+прошлый умер с раннером, delta заливает все файлы | running     | 100      | delta     | 101     | warn
+re-run упавшего delta-запуска                     | failed      | 100      | delta     | 100     | warn

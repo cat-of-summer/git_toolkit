@@ -38,7 +38,7 @@ while IFS='|' read -r name trigger event ref_type expect; do
     CI_COMMAND='true' \
     DEPLOY_HOST=h DEPLOY_USER=u DEPLOY_KEY=k DEPLOY_PATH=p \
     DEPLOY_METHOD=command DEPLOY_MIRROR=false DEPLOY_LAST_COMMITS=false \
-    INPUT_COMMITS= PUSH_COMMITS= INPUT_RUN_CI= INPUT_RUN_RELEASE= INPUT_RUN_CD= \
+    INPUT_COMMITS= INPUT_RUN_CI= INPUT_RUN_RELEASE= INPUT_RUN_CD= \
     RUNS_ON= PUBLISH_METHOD= \
     bash "$SCRIPT" 2>&1)"
   code=$?
@@ -73,7 +73,7 @@ while IFS='|' read -r name trigger ref_type ref_name build expect; do
     ACTION_TRIGGER="$trigger" EVENT=push REF_TYPE="$ref_type" REF_NAME="$ref_name" REF_NAME_NORM=x \
     DEFAULT_BRANCH=main BUILD_COMMAND="$build" CI_COMMAND= \
     DEPLOY_METHOD=command DEPLOY_MIRROR=false DEPLOY_LAST_COMMITS=false \
-    INPUT_COMMITS= PUSH_COMMITS= RUNS_ON= PUBLISH_METHOD= \
+    INPUT_COMMITS= RUNS_ON= PUBLISH_METHOD= \
     bash "$SCRIPT" 2>&1)" || { fail "$name" "шаг упал" "$log"; continue; }
   check_eq "$name" "$expect" "$(grep -m1 '^warm_cache=' "$out" | cut -d= -f2)"
 done <<'CASES'
@@ -82,6 +82,39 @@ warm: push в не-main ветку|tag|branch|feature|make|false
 warm: ci и так идёт на main|push|branch|main|make|false
 warm: нет команд сборки и тестов|tag|branch|main||false
 warm: тег|tag|tag|v1.0.0|make|false
+CASES
+
+# scope деплоя: что заливается и откуда берётся список файлов. expect: scope,delta,commits либо !error:<подстрока>.
+while IFS='|' read -r name trigger event ref_type method mirror last commits expect; do
+  out="$tmp/out"; : > "$out"
+  log="$(env -i PATH="$PATH" HOME="${HOME:-/tmp}" \
+    GITHUB_OUTPUT="$out" \
+    ACTION_TRIGGER="$trigger" EVENT="$event" REF_TYPE="$ref_type" REF_NAME=main REF_NAME_NORM=x \
+    DEFAULT_BRANCH=main BUILD_COMMAND= CI_COMMAND= \
+    DEPLOY_HOST=h DEPLOY_USER=u DEPLOY_KEY=k DEPLOY_PATH=p \
+    DEPLOY_METHOD="$method" DEPLOY_MIRROR="$mirror" DEPLOY_LAST_COMMITS="$last" \
+    INPUT_COMMITS="$commits" RUNS_ON= PUBLISH_METHOD= \
+    bash "$SCRIPT" 2>&1)"
+  code=$?
+  if [ "${expect#!error:}" != "$expect" ]; then
+    want="${expect#!error:}"
+    if [ "$code" -ne 0 ] && printf '%s' "$log" | grep -qF "$want"; then pass "$name"; else fail "$name" "ожидалась ошибка «$want»" "$log"; fi
+    continue
+  fi
+  [ "$code" -eq 0 ] || { fail "$name" "шаг упал" "$log"; continue; }
+  check_eq "$name" "$expect" "$(grep -m1 '^scope=' "$out" | cut -d= -f2),$(grep -m1 '^delta=' "$out" | cut -d= -f2),$(grep -m1 '^commits=' "$out" | cut -d= -f2)"
+done <<'CASES'
+scope: push ветки с LAST_COMMITS — дельта|push|push|branch|rsync|true|true||selective,true,
+scope: push ветки без LAST_COMMITS — полный|push|push|branch|rsync|true|false||full,false,
+scope: push тега с LAST_COMMITS — полный|push|push|tag|rsync|true|true||full,false,
+scope: ручной с commits — покоммитный|push|workflow_dispatch|branch|ftp|true|true|abc,def|selective,false,abc,def
+scope: ручной без commits — полный|push|workflow_dispatch|branch|ftp|true|true||full,false,
+scope: деплой командой|push|push|branch|command|true|true||none,false,
+scope: tag-триггер с LAST_COMMITS запрещён|tag|push|tag|rsync|true|true||!error:has no effect with ACTION_TRIGGER=tag
+scope: tag-триггер с LAST_COMMITS, ручной запуск|tag|workflow_dispatch|branch|rsync|true|true||!error:has no effect with ACTION_TRIGGER=tag
+scope: tag-триггер без LAST_COMMITS|tag|push|tag|rsync|true|false||full,false,
+scope: DEPLOY_MIRROR=full с дельтой запрещён|push|push|branch|rsync|full|true||!error:incompatible with selective
+scope: git с дельтой запрещён|push|push|branch|git|true|true||!error:not supported in selective
 CASES
 
 suite_result "action-trigger"

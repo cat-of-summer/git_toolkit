@@ -113,6 +113,14 @@ st() { ( as_ssh "$1"; LK_REPO=org/app LK_WORKFLOW=w LK_ENVIRONMENT=main LK_SOURC
 got="$(st dep1 7 full ok)$(st dep2 5 full ok)$(st dep2 8 selective fail)$(st dep1 9 selective ok)$(st dep1 10 full ok)"
 check_eq "ssh: устаревание и незавершённый деплой между пользователями" \
   "false:0 true:0 false:0 :3 false:0 " "$got"
+got="$( LK_REPO=org/app LK_WORKFLOW=w LK_ENVIRONMENT=main LK_SOURCE=branch:main
+        as_ssh dep1; LK_SCOPE=full LK_RUN_NUMBER=11 LK_RUN_ID=r11 LK_TOKEN=t11 LK_COMMIT=X
+        lk_check_state; lk_mark_state ok
+        LK_SCOPE=selective LK_DELTA=true LK_RUN_NUMBER=12 LK_RUN_ID=r12 LK_TOKEN=t12 LK_COMMIT=Y
+        lk_check_state; printf '%s ' "$LK_DEPLOY_BASE"; lk_mark_state ok
+        as_ssh dep2; LK_RUN_NUMBER=13 LK_RUN_ID=r13 LK_TOKEN=t13 LK_COMMIT=Z
+        lk_check_state; printf '%s' "$LK_DEPLOY_BASE" )" 2>/dev/null
+check_eq "ssh: база delta — выложенный коммит, в том числе другим пользователем" "X Y" "$got"
 
 ( LK_TRANSPORT=ssh LK_SSH="$W/ssh-dep1" LK_SSH_TARGET="dep1@nohost.invalid" LK_TOKEN=X LK_WAIT=5; lk_acquire ) 2>"$W/nohost.log"
 check_eq "ssh: недоступный сервер — код 2 без зависания" 2 "$?"
@@ -164,6 +172,13 @@ st() { ( as_ftp; LK_REPO=org/app LK_WORKFLOW=w LK_ENVIRONMENT=main LK_SOURCE=bra
 got="$(st 1 full ok)$(st 2 selective fail)$(st 3 selective ok)$(st 4 full ok)$(st 2 full ok)"
 check_eq "ftp: сбой → selective блок → full чинит → устаревший пропущен" \
   "false:0 false:0 :3 false:0 true:0 " "$got"
+got="$( as_ftp; LK_REPO=org/app LK_WORKFLOW=w LK_ENVIRONMENT=main LK_SOURCE=branch:main
+        LK_SCOPE=full LK_RUN_NUMBER=10 LK_RUN_ID=r10 LK_TOKEN=t10 LK_COMMIT=X
+        lk_check_state; lk_mark_state ok
+        LK_SCOPE=selective LK_DELTA=true LK_RUN_NUMBER=11 LK_RUN_ID=r11 LK_TOKEN=t11 LK_COMMIT=Y
+        lk_check_state; printf '%s ' "$LK_DEPLOY_BASE"; lk_mark_state ok
+        lk_field deployed "$(lkt_read "state/$(lk_state_key)")" )" 2>/dev/null
+check_eq "ftp: delta считает от выложенного коммита и сдвигает его" "X Y" "$got"
 
 started=$(date +%s)
 ( LK_TRANSPORT=ftp LK_FTP_HOST=nohost.invalid LK_FTP_USER=u LK_TOKEN=X LK_WAIT=5 LK_FTP_OP_TIMEOUT=10; lk_acquire ) 2>/dev/null

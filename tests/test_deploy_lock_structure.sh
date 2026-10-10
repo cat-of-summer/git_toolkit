@@ -35,10 +35,21 @@ before() {
 }
 
 before "Install system packages"       "Acquire deploy lock"
-before "Resolve deploy files"          "Acquire deploy lock"
+before "Resolve target commit"         "Build"
 before "Set up SSH access"             "Acquire deploy lock"
 before "Build"                         "Acquire deploy lock"
+before "Acquire deploy lock"           "Resolve deploy files"
+before "Resolve deploy files"          "Before deploy command"
 before "Acquire deploy lock"           "Before deploy command"
+
+s="Resolve deploy files"
+blk="$(step_block "$s")"
+if has "$blk" "^        if: .*env.DEPLOY_SUPERSEDED != 'true'"; then
+  pass "«$s» пропускается у устаревшего запуска"
+else
+  fail "«$s» пропускается у устаревшего запуска" "$(grep '^        if:' <<< "$blk")"
+fi
+if has_f "$blk" 'DEPLOY_BASE'; then pass "«$s» считает дельту от DEPLOY_BASE из записи под замком"; else fail "«$s» считает дельту от DEPLOY_BASE из записи под замком"; fi
 before "After deploy command"          "Release deploy lock"
 before "Release deploy lock"           "Clean up"
 

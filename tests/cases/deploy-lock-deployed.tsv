@@ -1,0 +1,20 @@
+# Коммит, чьё дерево целиком лежит на сервере (поле deployed записи), и база дельты.
+# prev: status;scope;commit;deployed прошлой записи, deployed "~" — поля нет (старая запись); "-" — записи нет.
+# cur: scope текущего запуска (full | selective | none | delta = selective с DEPLOY_LAST_COMMITS). Коммит текущего — C.
+# run: new — другой запуск, same — re-run прошлого. action: ok | failed — чем закончился текущий.
+# base: DEPLOY_BASE после lk_check_state ("-" — пусто). after: deployed записи после lk_mark_state.
+#
+# имя                                         | prev              | cur       | run  | action | base | after
+записи нет, delta                             | -                 | delta     | new  | ok     | -    | C
+delta от прошлого deployed                    | ok;selective;P;D  | delta     | new  | ok     | D    | C
+упавший delta не сдвигает deployed            | ok;selective;P;D  | delta     | new  | failed | D    | D
+старая запись: успешный full считается        | ok;full;P;~       | delta     | new  | ok     | P    | C
+старая запись: selective не считается         | ok;selective;P;~  | delta     | new  | ok     | -    | C
+старая запись: упавший full не считается      | failed;full;P;~   | delta     | new  | ok     | -    | C
+пустой deployed не подменяется commit         | ok;full;P;        | delta     | new  | ok     | -    | C
+прошлый упал — delta заливает всё             | failed;full;P;D   | delta     | new  | ok     | -    | C
+re-run упавшего delta берёт ту же базу        | failed;selective;P;D | delta  | same | ok     | D    | C
+покоммитный selective не сдвигает deployed    | ok;full;P;D       | selective | new  | ok     | -    | D
+full сдвигает deployed                        | ok;selective;P;D  | full      | new  | ok     | -    | C
+упавший full не сдвигает deployed             | ok;selective;P;D  | full      | new  | failed | -    | D
+деплой командой не сдвигает deployed          | ok;full;P;D       | none      | new  | ok     | -    | D

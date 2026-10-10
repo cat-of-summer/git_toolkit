@@ -31,6 +31,7 @@ banned 'GITHUB_REF#refs/heads больше не разбирается вруч�
 banned "выхода is_tag больше нет"                    'outputs\.is_tag'
 banned "джобы resolve-branch больше нет"             'resolve-branch'
 banned "REF_COMMIT не переиспользуется под коммит деплоя" 'REF_COMMIT=\$\(git'
+banned "выборочный push не берёт коммиты из события"   'github\.event\.commits'
 
 for job_file in ci-cd.yml grabber.yml; do
   missing=""
