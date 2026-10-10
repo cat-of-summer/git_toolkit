@@ -4,6 +4,7 @@
 ## Файлы
 
 - [action-trigger.tsv](action-trigger.tsv.md)
+- [deploy-lock-deployed.tsv](deploy-lock-deployed.tsv.md)
 - [deploy-lock-source.tsv](deploy-lock-source.tsv.md)
 - [deploy-lock-status.tsv](deploy-lock-status.tsv.md)
 - [deploy-lock-superseded.tsv](deploy-lock-superseded.tsv.md)
