@@ -1,20 +1,26 @@
 # Коммит, чьё дерево целиком лежит на сервере (поле deployed записи), и база дельты.
-# prev: status;scope;commit;deployed прошлой записи, deployed "~" — поля нет (старая запись); "-" — записи нет.
+# prev: status;scope;commit;deployed;pending прошлой записи. deployed "~" — поля нет (старая запись),
+#   pending можно опустить; "-" вместо всей записи — записи нет.
 # cur: scope текущего запуска (full | selective | none | delta = selective с DEPLOY_LAST_COMMITS). Коммит текущего — C.
 # run: new — другой запуск, same — re-run прошлого. action: ok | failed — чем закончился текущий.
-# base: DEPLOY_BASE после lk_check_state ("-" — пусто). after: deployed записи после lk_mark_state.
+# base, extra, fallback: DEPLOY_BASE, DEPLOY_EXTRA, DEPLOY_FALLBACK после lk_check_state ("-" — пусто).
+# after, pending: поля deployed и pending записи после lk_mark_state ("-" — пусто).
 #
-# имя                                         | prev              | cur       | run  | action | base | after
-записи нет, delta                             | -                 | delta     | new  | ok     | -    | C
-delta от прошлого deployed                    | ok;selective;P;D  | delta     | new  | ok     | D    | C
-упавший delta не сдвигает deployed            | ok;selective;P;D  | delta     | new  | failed | D    | D
-старая запись: успешный full считается        | ok;full;P;~       | delta     | new  | ok     | P    | C
-старая запись: selective не считается         | ok;selective;P;~  | delta     | new  | ok     | -    | C
-старая запись: упавший full не считается      | failed;full;P;~   | delta     | new  | ok     | -    | C
-пустой deployed не подменяется commit         | ok;full;P;        | delta     | new  | ok     | -    | C
-прошлый упал — delta заливает всё             | failed;full;P;D   | delta     | new  | ok     | -    | C
-re-run упавшего delta берёт ту же базу        | failed;selective;P;D | delta  | same | ok     | D    | C
-покоммитный selective не сдвигает deployed    | ok;full;P;D       | selective | new  | ok     | -    | D
-full сдвигает deployed                        | ok;selective;P;D  | full      | new  | ok     | -    | C
-упавший full не сдвигает deployed             | ok;selective;P;D  | full      | new  | failed | -    | D
-деплой командой не сдвигает deployed          | ok;full;P;D       | none      | new  | ok     | -    | D
+# имя                                           | prev                 | cur       | run  | action | base | extra | fallback | after | pending
+записи нет, delta — диапазон пуша               | -                    | delta     | new  | ok     | -    | -     | push     | C     | -
+delta от прошлого deployed                      | ok;selective;P;D     | delta     | new  | ok     | D    | -     | push     | C     | -
+упавший delta не сдвигает deployed              | ok;selective;P;D     | delta     | new  | failed | D    | -     | push     | D     | -
+старая запись: успешный full считается          | ok;full;P;~          | delta     | new  | ok     | P    | -     | push     | C     | -
+старая запись: успешный selective считается     | ok;selective;P;~     | delta     | new  | ok     | P    | -     | push     | C     | -
+старая запись: упавший не считается             | failed;full;P;~      | delta     | new  | ok     | -    | P     | tree     | C     | -
+пустой deployed не подменяется commit           | ok;full;P;           | delta     | new  | ok     | -    | -     | push     | C     | -
+прошлый упал — delta перезаливает его файлы     | failed;full;P;D      | delta     | new  | ok     | D    | P     | tree     | C     | -
+re-run упавшего delta берёт ту же базу          | failed;selective;P;D | delta     | same | ok     | D    | P     | tree     | C     | -
+два упавших подряд — оба в extra                | failed;selective;P2;D;P1 | delta | new  | ok     | D    | P1 P2 | tree     | C     | -
+упавший после упавшего копит pending            | failed;selective;P;D | delta     | new  | failed | D    | P     | tree     | D     | P
+покоммитный selective не сдвигает deployed      | ok;full;P;D          | selective | new  | ok     | -    | -     | -        | D     | -
+full сдвигает deployed                          | ok;selective;P;D     | full      | new  | ok     | -    | -     | -        | C     | -
+full после упавшего сбрасывает pending          | failed;selective;P;D | full      | new  | ok     | -    | -     | -        | C     | -
+упавший full не сдвигает deployed               | ok;selective;P;D     | full      | new  | failed | -    | -     | -        | D     | -
+деплой командой не сдвигает deployed            | ok;full;P;D          | none      | new  | ok     | -    | -     | -        | D     | -
+деплой командой после упавшего хранит pending   | failed;full;P;D      | none      | new  | ok     | -    | -     | -        | D     | P

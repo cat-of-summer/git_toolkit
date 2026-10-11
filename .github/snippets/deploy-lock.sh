@@ -10,6 +10,8 @@ LK_TOKEN="${LK_TOKEN:-}"
 LK_SHARED_BASE="${LK_SHARED_BASE:-}"
 LK_SUPERSEDED="${LK_SUPERSEDED:-false}"
 LK_DEPLOY_BASE="${LK_DEPLOY_BASE:-}"
+LK_DEPLOY_EXTRA="${LK_DEPLOY_EXTRA:-}"
+LK_DEPLOY_FALLBACK="${LK_DEPLOY_FALLBACK:-}"
 
 lk_now()   { date +%s; }
 lk_sleep() { sleep "$1"; }
@@ -420,22 +422,43 @@ lk__state_text() {
   printf 'token=%s\n'       "$LK_TOKEN"
   printf 'status=%s\n'      "$1"
   printf 'deployed=%s\n'    "$(lk__clean "${2:-}")"
+  printf 'pending=%s\n'     "$(lk__clean "${3:-}")"
 }
 
 # Commit whose whole tree is on the server: written by a successful full or delta deploy and
-# carried over by every other record. Records without the field: a successful full deploy counts.
+# carried over by every other record. Records without the field were written before it existed:
+# a successful one counts with its commit, whatever its scope — the push that wrote it shipped
+# the changes up to that commit.
 lk__deployed_of() {
   local rec="$1" d
   if d="$(lk_field deployed "$rec")"; then printf '%s' "$d"; return 0; fi
-  if [ "$(lk_field status "$rec" || true)" = ok ] && [ "$(lk_field scope "$rec" || true)" = full ]; then
+  if [ "$(lk_field status "$rec" || true)" = ok ]; then
     lk_field commit "$rec" || true
   fi
 }
 
+# Commits of the runs that did not complete since "deployed", space-separated: each may have left
+# part of its files on the server. Cleared by a successful full or delta deploy.
+lk__pending_of() {
+  local rec="$1" p c
+  p="$(lk_field pending "$rec" || true)"
+  case "$(lk_field status "$rec" || true)" in
+    running|failed)
+      c="$(lk_field commit "$rec" || true)"
+      if [ -n "$c" ]; then
+        case " $p " in *" $c "*) ;; *) p="${p:+$p }$c" ;; esac
+      fi
+      ;;
+  esac
+  printf '%s' "$p"
+}
+
 lk_check_state() {
-  local key rec prev status prev_id what deployed
+  local key rec prev status prev_id what deployed pending
   LK_SUPERSEDED=false
   LK_DEPLOY_BASE=""
+  LK_DEPLOY_EXTRA=""
+  LK_DEPLOY_FALLBACK=""
   case "${LK_RUN_NUMBER:-}" in ''|*[!0-9]*) return 0 ;; esac
   key="$(lk_state_key)"
   rec="$(lkt_read "state/$key" || true)"
@@ -450,14 +473,23 @@ lk_check_state() {
   status="$(lk_field status "$rec" || true)"
   prev_id="$(lk_field run_id "$rec" || true)"
   deployed="$(lk__deployed_of "$rec")"
-  [ "${LK_DELTA:-}" = true ] && LK_DEPLOY_BASE="$deployed"
+  pending="$(lk__pending_of "$rec")"
+  # Delta base for "Resolve deploy files": changes since "deployed", plus the changes up to each
+  # pending commit. Without a usable base it falls back to the range of the push itself, unless
+  # an unfinished run may have left files outside that range: then to all tracked files.
+  if [ "${LK_DELTA:-}" = true ]; then
+    LK_DEPLOY_BASE="$deployed"
+    LK_DEPLOY_EXTRA="$pending"
+    if [ -n "$pending" ]; then LK_DEPLOY_FALLBACK=tree; else LK_DEPLOY_FALLBACK=push; fi
+  fi
   if [ "$status" = running ] || [ "$status" = failed ]; then
     what="the previous deploy #${prev:-?} ($(lk_field run_url "$rec" || true), commit $(lk_field commit "$rec" | cut -c1-7)) did not complete (status: $status)"
     if [ -n "$prev_id" ] && [ "$prev_id" = "${LK_RUN_ID:-}" ]; then
       lk_log "::warning::Deploy lock: $what — this is a re-run of it, deploying the same changes again."
+    elif [ "${LK_DELTA:-}" = true ] && [ -n "$deployed" ]; then
+      lk_log "::warning::Deploy lock: $what — it may have left part of its files on the server, so this deploy also re-uploads every file changed between the last deployed commit $(printf '%.7s' "$deployed") and the unfinished runs."
     elif [ "${LK_DELTA:-}" = true ]; then
-      LK_DEPLOY_BASE=""
-      lk_log "::warning::Deploy lock: $what — it may have left part of its files on the server, so this deploy uploads all tracked files instead of the changes since the last successful deploy."
+      lk_log "::warning::Deploy lock: $what — it may have left part of its files on the server, and there is no record of the last deployed commit, so this deploy uploads all tracked files and deletes nothing."
     elif [ "${LK_SCOPE:-}" = selective ]; then
       echo "::error::Deploy lock: $what. A selective deploy uploads only its own commits and would leave the gaps of that run on the server. Run a full deploy once: workflow_dispatch without 'commits' (or a push with DEPLOY_LAST_COMMITS=false)." >&2
       return 3
@@ -466,11 +498,11 @@ lk_check_state() {
     fi
   fi
 
-  lk__state_text running "$deployed" | lkt_write "state/$key"
+  lk__state_text running "$deployed" "$pending" | lkt_write "state/$key"
 }
 
 lk_mark_state() {
-  local want="$1" only_if="${2:-}" key rec deployed
+  local want="$1" only_if="${2:-}" key rec deployed pending
   case "${LK_RUN_NUMBER:-}" in ''|*[!0-9]*) return 0 ;; esac
   [ -n "$LK_TOKEN" ] || return 0
   key="$(lk_state_key)"
@@ -478,10 +510,12 @@ lk_mark_state() {
   [ "$(lk_field token "$rec" || true)" = "$LK_TOKEN" ] || return 0
   if [ -n "$only_if" ] && [ "$(lk_field status "$rec" || true)" != "$only_if" ]; then return 0; fi
   deployed="$(lk_field deployed "$rec" || true)"
+  pending="$(lk_field pending "$rec" || true)"
   if [ "$want" = ok ] && { [ "${LK_SCOPE:-}" = full ] || [ "${LK_DELTA:-}" = true ]; }; then
     deployed="${LK_COMMIT:-}"
+    pending=""
   fi
-  lk__state_text "$want" "$deployed" | lkt_write "state/$key"
+  lk__state_text "$want" "$deployed" "$pending" | lkt_write "state/$key"
 }
 
 lk_stop_heartbeat() {

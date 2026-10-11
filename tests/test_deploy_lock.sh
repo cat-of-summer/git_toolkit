@@ -364,22 +364,25 @@ check_eq "устаревший запуск не трогает пометку f
   "$(lk_field status "$(cat "$b"/state/*)") $(lk_field token "$(cat "$b"/state/*)")"
 
 # --- deployed: база дельты, таблица кейсов ---------------------------------------------------------
+dash() { [ "$1" = "-" ] && printf '' || printf '%s' "$1"; }
 i=0
-while IFS='|' read -r name prev cur run action base after; do
+while IFS='|' read -r name prev cur run action base extra fallback after pending; do
   name="$(trim "$name")"
   [ -z "$name" ] && continue
   case "$name" in \#*) continue ;; esac
   prev="$(trim "$prev")"; cur="$(trim "$cur")"; run="$(trim "$run")"; action="$(trim "$action")"
-  base="$(trim "$base")"; after="$(trim "$after")"
-  [ "$base" = "-" ] && base=""
+  base="$(dash "$(trim "$base")")"; extra="$(dash "$(trim "$extra")")"
+  fallback="$(dash "$(trim "$fallback")")"; after="$(dash "$(trim "$after")")"
+  pending="$(dash "$(trim "$pending")")"
   i=$(( i + 1 ))
   b="$T/dp$i"
   got="$(
     LK_BASE="$b"; st_env; lkt_ensure_base
     if [ "$prev" != "-" ]; then
-      IFS=';' read -r pst psc pco pde <<< "$prev"
+      IFS=';' read -r pst psc pco pde ppe <<< "$prev"
       { printf 'run_number=5\nrun_id=r5\ntoken=OLD\nstatus=%s\nscope=%s\ncommit=%s\n' "$pst" "$psc" "$pco"
-        [ "$pde" = "~" ] || printf 'deployed=%s\n' "$pde"; } | lkt_write "state/$(lk_state_key)"
+        [ "$pde" = "~" ] || printf 'deployed=%s\n' "$pde"
+        [ -z "$ppe" ] || printf 'pending=%s\n' "$ppe"; } | lkt_write "state/$(lk_state_key)"
     fi
     LK_SCOPE="$cur" LK_DELTA=false
     [ "$cur" = delta ] && { LK_SCOPE=selective; LK_DELTA=true; }
@@ -390,9 +393,11 @@ while IFS='|' read -r name prev cur run action base after; do
       ok)     lk_mark_state ok ;;
       failed) lk_mark_state failed running ;;
     esac
-    printf '%s|%s' "$LK_DEPLOY_BASE" "$(lk_field deployed "$(lkt_read "state/$(lk_state_key)")")"
+    rec="$(lkt_read "state/$(lk_state_key)")"
+    printf '%s|%s|%s|%s|%s' "$LK_DEPLOY_BASE" "$LK_DEPLOY_EXTRA" "$LK_DEPLOY_FALLBACK" \
+      "$(lk_field deployed "$rec")" "$(lk_field pending "$rec")"
   )"
-  check_eq "deployed: $name" "$base|$after" "$got"
+  check_eq "deployed: $name" "$base|$extra|$fallback|$after|$pending" "$got"
 done < "$HERE/cases/deploy-lock-deployed.tsv"
 
 # Гонка двух push с DEPLOY_LAST_COMMITS: #11 взял замок раньше #10. Дельта #11 считается от

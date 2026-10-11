@@ -32,6 +32,7 @@ banned "выхода is_tag больше нет"                    'outputs\.is
 banned "джобы resolve-branch больше нет"             'resolve-branch'
 banned "REF_COMMIT не переиспользуется под коммит деплоя" 'REF_COMMIT=\$\(git'
 banned "выборочный push не берёт коммиты из события"   'github\.event\.commits'
+banned "delta не льёт все пути истории"                'all_history|all paths ever touched'
 
 for job_file in ci-cd.yml grabber.yml; do
   missing=""

@@ -79,7 +79,8 @@ fi
 
 acq="$(extract_step "$WF" deploy-lock)"
 for want in 'lk_acquire_all' 'lk_release_all' 'LK_SHARED_BASE=' 'lk_check_state' 'lk_heartbeat' 'lk_source_from_ref' \
-            'DEPLOY_SUPERSEDED=' 'LK_HB_PID=' '# >>> .github/snippets/deploy-lock.sh'; do
+            'DEPLOY_SUPERSEDED=' 'DEPLOY_BASE=' 'DEPLOY_EXTRA=' 'DEPLOY_FALLBACK=' 'LK_HB_PID=' \
+            '# >>> .github/snippets/deploy-lock.sh'; do
   if has_f "$acq" "$want"; then pass "Acquire содержит $want"; else fail "Acquire содержит $want"; fi
 done
 if awk '/lk_check_state/{c=NR} /lk_heartbeat/{h=NR} END{exit !(c && h && c < h)}' <<< "$acq"; then
