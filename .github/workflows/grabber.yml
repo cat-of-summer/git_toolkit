@@ -768,6 +768,8 @@ jobs:
         run: |
           set -euo pipefail
           export LC_ALL=C
+          # Non-ASCII paths printed as is, not as "\320\272..." — otherwise they never match the lists.
+          git config core.quotepath false
 
           SERVER_FILES="$RUNNER_TEMP/server_files.txt"
           TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
@@ -805,6 +807,8 @@ jobs:
                   echo "set net:reconnect-interval-base 5"
                   echo "set ftp:passive-mode true"
                   echo "set ssl:verify-certificate no"
+                  # Under LC_ALL=C lftp transliterates names ("img — копия" → "img -- kopiya").
+                  echo "set file:charset UTF-8"
                   echo "set cmd:fail-exit false"
                   while IFS= read -r d; do
                     echo "cls -1aF -- \"$root/${d:+$d/}\" || echo \"GT_FAIL $root/${d:+$d/}\""
@@ -985,6 +989,7 @@ jobs:
               echo "set net:reconnect-interval-multiplier 1"
               echo "set ftp:passive-mode true"
               echo "set ssl:verify-certificate no"
+              echo "set file:charset UTF-8"
               echo "set xfer:clobber true"
               # One bad file must not throw away the rest: every failed get leaves a marker instead.
               echo "set cmd:fail-exit false"
