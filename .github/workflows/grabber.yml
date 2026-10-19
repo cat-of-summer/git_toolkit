@@ -266,6 +266,7 @@ jobs:
       DEPLOY_LOCAL_DIR: ${{ vars.DEPLOY_LOCAL_DIR || './' }}
       DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
       DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+      GRABBER_FTP_PARALLEL: ${{ vars.GRABBER_FTP_PARALLEL || '4' }}
       COMMITS: ${{ inputs.commits || '' }}
 
     steps:
@@ -770,7 +771,88 @@ jobs:
 
           SERVER_FILES="$RUNNER_TEMP/server_files.txt"
           TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
+          SKIPPED_DIRS="$RUNNER_TEMP/skipped_dirs.txt"
           : > "$SERVER_FILES"
+
+          # FTP: walk the tree level by level over several connections and never enter a directory
+          # this repository's .gitignore excludes as a whole, unless tracked files live under it.
+          list_ftp() {
+            local root="${DEPLOY_PATH%/}" jobs="$GRABBER_FTP_PARALLEL" level=0 d c pid
+            local work="$RUNNER_TEMP/ftp_walk" failed="$RUNNER_TEMP/list_failed.txt"
+            local prefix="${LOCAL_DIR:+$LOCAL_DIR/}"
+            case "$jobs" in ''|*[!0-9]*|0) jobs=4 ;; esac
+            rm -rf "$work"; mkdir -p "$work"
+            : > "$failed"; : > "$SKIPPED_DIRS"
+
+            # Every ancestor directory of a tracked file.
+            git ls-files \
+              | awk -F/ '{ p = ""; for (i = 1; i < NF; i++) { p = (i > 1 ? p "/" : "") $i; print p } }' \
+              | sort -u > "$work/tracked_dirs"
+
+            # A level is a list of directories relative to DEPLOY_PATH; the root is the empty line.
+            echo "" > "$work/level"
+            echo "Listing the FTP server level by level over $jobs connection(s)..."
+            while [ -s "$work/level" ]; do
+              level=$((level + 1))
+              rm -f "$work"/chunk_*
+              split -n "r/$jobs" "$work/level" "$work/chunk_"
+              local pids=()
+              for c in "$work"/chunk_*; do
+                [ -s "$c" ] || continue
+                {
+                  echo "set net:timeout 30"
+                  echo "set net:max-retries 5"
+                  echo "set net:reconnect-interval-base 5"
+                  echo "set ftp:passive-mode true"
+                  echo "set ssl:verify-certificate no"
+                  echo "set cmd:fail-exit false"
+                  while IFS= read -r d; do
+                    echo "cls -1aF -- \"$root/${d:+$d/}\" || echo \"GT_FAIL $root/${d:+$d/}\""
+                  done < "$c"
+                  echo "quit"
+                } | lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" > "$c.out" &
+                pids+=($!)
+              done
+              for pid in "${pids[@]}"; do wait "$pid"; done
+
+              cat "$work"/chunk_*.out > "$work/out"
+              { grep '^GT_FAIL ' "$work/out" || true; } | cut -c9- >> "$failed"
+              { grep -v '^GT_FAIL ' "$work/out" || true; } \
+                | awk -v p="$root/" 'index($0, p) == 1 { print substr($0, length(p) + 1) }' > "$work/rel"
+
+              # cls -F marks directories with '/' and symlinks with '@'; a symlink is fetched as a file.
+              { grep '/$' "$work/rel" || true; } | sed 's|/$||' | { grep -vE '^$|^\.git' || true; } \
+                | sed "s|^|$prefix|" > "$work/dirs"
+              { grep -v '/$' "$work/rel" || true; } | sed 's|@$||' | { grep -vE '^$|^\.git' || true; } \
+                > "$work/files"
+              cat "$work/files" >> "$SERVER_FILES"
+
+              # check-ignore needs the directory on disk and no trailing slash to apply dir rules right.
+              : > "$work/pruned"
+              if [ -s "$work/dirs" ]; then
+                while IFS= read -r d; do mkdir -p "./$d" 2>/dev/null || true; done < "$work/dirs"
+                git check-ignore --stdin < "$work/dirs" > "$work/ignored" 2>/dev/null || true
+                comm -23 <(sort -u "$work/ignored") "$work/tracked_dirs" > "$work/pruned"
+              fi
+              cat "$work/pruned" >> "$SKIPPED_DIRS"
+              comm -23 <(sort -u "$work/dirs") "$work/pruned" \
+                | if [ -n "$prefix" ]; then sed "s|^$prefix||"; else cat; fi > "$work/level"
+
+              echo "  level $level: $(wc -l < "$work/files") files, $(wc -l < "$work/level") dirs to enter, $(wc -l < "$work/pruned") dirs skipped by .gitignore"
+            done
+
+            if [ -s "$failed" ]; then
+              if grep -qxF "$root/" "$failed"; then
+                echo "::error::Cannot list DEPLOY_PATH '$root/' on the FTP server — see the lftp errors above." >&2
+                exit 1
+              fi
+              echo "::warning::Cannot list $(wc -l < "$failed") director(y/ies) on the FTP server, their files are not grabbed: $(head -20 "$failed" | tr '\n' ' ')"
+              if [ "$DEPLOY_MIRROR" = "true" ]; then
+                echo "::error::deploy_mirror=true with unlisted directories would delete every tracked file under them — refusing." >&2
+                exit 1
+              fi
+            fi
+          }
 
           # Fills SERVER_FILES: in commits mode — the commit files that exist on the server,
           # otherwise — every file on the server.
@@ -795,29 +877,7 @@ jobs:
                 "find -L '$DEPLOY_PATH' -type f -printf '%P\n'" \
                 | { grep -vE '^\.git' || true; } > "$SERVER_FILES"
             else
-              local raw="$RUNNER_TEMP/server_files_raw.txt" pid count
-              : > "$raw"
-              printf '%s\n' \
-                "set net:timeout 30" \
-                "set net:max-retries 5" \
-                "set net:reconnect-interval-base 5" \
-                "set ftp:passive-mode true" \
-                "set ssl:verify-certificate no" \
-                "set cmd:fail-exit true" \
-                "find $DEPLOY_PATH" \
-                "quit" \
-                | lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" > "$raw" &
-              pid=$!
-              echo "Listing files on the FTP server (progress every 15s)..."
-              while kill -0 "$pid" 2>/dev/null; do
-                sleep 15
-                count=$(wc -l < "$raw" 2>/dev/null || echo 0)
-                echo "  ... ${count} files listed so far"
-              done
-              wait "$pid"
-              { grep -v '/$' "$raw" || true; } \
-                | sed "s|^${path}/||" \
-                | { grep -vE '^$|^\.git' || true; } > "$SERVER_FILES"
+              list_ftp
             fi
             echo "Files on the server: $(wc -l < "$SERVER_FILES")"
           }
@@ -871,6 +931,9 @@ jobs:
           echo "=== Summary ==="
           echo "Source files: $(wc -l < "$SERVER_FILES")"
           echo "Ignored:      $(wc -l < "$IGNORED_FILES")"
+          if [ -f "$SKIPPED_DIRS" ]; then
+            echo "Skipped dirs: $(wc -l < "$SKIPPED_DIRS") (ignored as a whole, not listed)"
+          fi
           echo "To download:  $(wc -l < "$TO_DOWNLOAD")"
 
           if ! [ -s "$TO_DOWNLOAD" ]; then
@@ -923,22 +986,42 @@ jobs:
               echo "set ftp:passive-mode true"
               echo "set ssl:verify-certificate no"
               echo "set xfer:clobber true"
-              # In commits mode a file may be gone from the server: keep going, count what arrived.
-              if [ "$COMMITS_MODE" = "true" ]; then
-                echo "set cmd:fail-exit false"
-              else
-                echo "set cmd:fail-exit true"
-              fi
+              # One bad file must not throw away the rest: every failed get leaves a marker instead.
+              echo "set cmd:fail-exit false"
               while IFS= read -r file; do
                 [ -z "$file" ] && continue
                 local_dir=$(dirname "$DEST_DIR/$file")
                 echo "mkdir -fp \"$local_dir\""
-                echo "get -O \"$local_dir\" \"${DEPLOY_PATH%/}/$file\""
+                echo "get -O \"$local_dir\" \"${DEPLOY_PATH%/}/$file\" || echo \"GT_FAIL $file\""
               done < "$TO_DOWNLOAD"
               echo "quit"
             } > "$RUNNER_TEMP/lftp_get.txt"
 
-            lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" < "$RUNNER_TEMP/lftp_get.txt"
+            lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" \
+              < "$RUNNER_TEMP/lftp_get.txt" > "$RUNNER_TEMP/lftp_get.out"
+
+            FAILED="$RUNNER_TEMP/download_failed.txt"
+            { grep '^GT_FAIL ' "$RUNNER_TEMP/lftp_get.out" || true; } | cut -c9- > "$FAILED"
+            if [ -s "$FAILED" ]; then
+              N_FAILED=$(wc -l < "$FAILED")
+              N_TOTAL=$(grep -c . "$TO_DOWNLOAD" || true)
+              {
+                echo "### Files not downloaded from the FTP server: $N_FAILED of $N_TOTAL"
+                echo '```'
+                cat "$FAILED"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+
+              if [ "$COMMITS_MODE" = "true" ]; then
+                # Here a failed get is how a file gone from the server shows up.
+                echo "::warning::$N_FAILED of $N_TOTAL commit file(s) did not download (gone from the server or unreadable): $(head -50 "$FAILED" | tr '\n' ' ')"
+              elif [ "$N_FAILED" -ge "$N_TOTAL" ]; then
+                echo "::error::None of the $N_TOTAL file(s) could be downloaded from the FTP server — see the lftp errors above." >&2
+                exit 1
+              else
+                echo "::warning::$N_FAILED of $N_TOTAL file(s) could not be downloaded from the FTP server and are left out of the commit (full list in the job summary): $(head -50 "$FAILED" | tr '\n' ' ')"
+              fi
+            fi
           else
             RC=0
             rsync -avz --progress \
