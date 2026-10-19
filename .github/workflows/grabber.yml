@@ -982,28 +982,44 @@ jobs:
           fi
 
           if [ "$DEPLOY_METHOD" = "ftp" ]; then
-            {
-              echo "set net:timeout 15"
-              echo "set net:max-retries 2"
-              echo "set net:reconnect-interval-base 2"
-              echo "set net:reconnect-interval-multiplier 1"
-              echo "set ftp:passive-mode true"
-              echo "set ssl:verify-certificate no"
-              echo "set file:charset UTF-8"
-              echo "set xfer:clobber true"
-              # One bad file must not throw away the rest: every failed get leaves a marker instead.
-              echo "set cmd:fail-exit false"
-              while IFS= read -r file; do
-                [ -z "$file" ] && continue
-                local_dir=$(dirname "$DEST_DIR/$file")
-                echo "mkdir -fp \"$local_dir\""
-                echo "get -O \"$local_dir\" \"${DEPLOY_PATH%/}/$file\" || echo \"GT_FAIL $file\""
-              done < "$TO_DOWNLOAD"
-              echo "quit"
-            } > "$RUNNER_TEMP/lftp_get.txt"
+            # Local directories are made here: mkdir inside lftp would create them on the server.
+            while IFS= read -r file; do
+              if [ -n "$file" ]; then mkdir -p "$(dirname "$DEST_DIR/$file")"; fi
+            done < "$TO_DOWNLOAD"
 
-            lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" \
-              < "$RUNNER_TEMP/lftp_get.txt" > "$RUNNER_TEMP/lftp_get.out"
+            JOBS="$GRABBER_FTP_PARALLEL"
+            case "$JOBS" in ''|*[!0-9]*|0) JOBS=4 ;; esac
+            rm -f "$RUNNER_TEMP"/get_chunk_*
+            split -n "r/$JOBS" "$TO_DOWNLOAD" "$RUNNER_TEMP/get_chunk_"
+            echo "Downloading $(grep -c . "$TO_DOWNLOAD" || true) file(s) over $JOBS connection(s)..."
+
+            PIDS=()
+            for c in "$RUNNER_TEMP"/get_chunk_*; do
+              [ -s "$c" ] || continue
+              {
+                echo "set net:timeout 15"
+                echo "set net:max-retries 2"
+                echo "set net:reconnect-interval-base 2"
+                echo "set net:reconnect-interval-multiplier 1"
+                echo "set ftp:passive-mode true"
+                echo "set ssl:verify-certificate no"
+                echo "set file:charset UTF-8"
+                echo "set xfer:clobber true"
+                # One bad file must not throw away the rest: every failed get leaves a marker instead.
+                echo "set cmd:fail-exit false"
+                while IFS= read -r file; do
+                  [ -z "$file" ] && continue
+                  echo "get -O \"$(dirname "$DEST_DIR/$file")\" \"${DEPLOY_PATH%/}/$file\" || echo \"GT_FAIL $file\""
+                done < "$c"
+                echo "quit"
+              } | lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST" > "$c.out" &
+              PIDS+=($!)
+            done
+            for pid in "${PIDS[@]}"; do wait "$pid"; done
+            : > "$RUNNER_TEMP/lftp_get.out"
+            for c in "$RUNNER_TEMP"/get_chunk_*.out; do
+              if [ -f "$c" ]; then cat "$c" >> "$RUNNER_TEMP/lftp_get.out"; fi
+            done
 
             FAILED="$RUNNER_TEMP/download_failed.txt"
             { grep '^GT_FAIL ' "$RUNNER_TEMP/lftp_get.out" || true; } | cut -c9- > "$FAILED"
