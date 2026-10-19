@@ -247,7 +247,7 @@ run_ftp_step() {
   printf '%s\n' ok1.txt sub/ok2.txt ro/bad.txt > "$scope_dir/tmp/files_upload.txt"
   : > "$scope_dir/tmp/files_delete.txt"
   extract_step /repo/.github/workflows/ci-cd.yml deploy-ftp > "$scope_dir/step.sh"
-  ( cd "$scope_dir/src" && env -i PATH="$PATH" HOME=/tmp RUNNER_TEMP="$scope_dir/tmp" \
+  ( cd "$scope_dir/src" && env -i PATH="$PATH" HOME=/tmp RUNNER_TEMP="$scope_dir/tmp" GITHUB_STEP_SUMMARY="$scope_dir/summary" \
       DEPLOY_HOST=ftp DEPLOY_PORT=2121 DEPLOY_USER=ftpu DEPLOY_KEY=ftppw DEPLOY_PATH="site" \
       DEPLOY_LOCAL_DIR=./ DEPLOY_MIRROR=false SCOPE="$scope" \
       timeout 240 bash "$scope_dir/step.sh" ) > "$scope_dir/out.log" 2>&1
@@ -263,8 +263,73 @@ for id in selective full; do
   else
     fail "$id: ошибка перечисляет не залитые файлы" "$(tail -20 "$W/step-$id/out.log")"
   fi
+  check_eq "$id: в сводке прогона только не залитый файл" "ro/bad.txt" \
+    "$(grep -v '^#\|^```' "$W/step-$id/summary" 2>/dev/null)"
   check_eq "$id: всё, что можно, залито" "ok1 ok2" \
     "$(printf 'cat site/ok1.txt\ncat site/sub/ok2.txt\n' | lftp -p 2121 -u ftpu,ftppw ftp 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 done
+
+ftp_utf8() { { echo 'set file:charset UTF-8'; cat; } | lftp -p 2121 -u ftpu,ftppw ftp; }
+
+# Шаг деплоя из каталога $1/src; остальное окружение — аргументами VAR=value.
+ftp_step() {
+  local d="$1"; shift
+  extract_step /repo/.github/workflows/ci-cd.yml deploy-ftp > "$d/step.sh"
+  ( cd "$d/src" && env -i PATH="$PATH" HOME=/tmp RUNNER_TEMP="$d/tmp" GITHUB_STEP_SUMMARY="$d/summary" \
+      DEPLOY_HOST=ftp DEPLOY_PORT=2121 DEPLOY_USER=ftpu DEPLOY_KEY=ftppw DEPLOY_LOCAL_DIR=./ "$@" \
+      timeout 240 bash "$d/step.sh" ) > "$d/out.log" 2>&1
+}
+
+# Выборочная заливка в несколько соединений: вложенные каталоги, пробел, кавычка и не-ASCII в именах,
+# плюс удаление. Сервер после шага должен совпасть с src байт в байт.
+P="$W/step-parallel"
+rm -rf "$P"; mkdir -p "$P/src" "$P/tmp" "$P/old" "$P/back"
+names=("a.txt" "dir/sub/b.txt" "dir/with space/c.txt" "img — копия.txt" 'q"uote.txt' "x/y/z/deep.txt")
+for i in $(seq 1 20); do names+=("many/f$i.txt"); done
+for n in "${names[@]}"; do mkdir -p "$P/src/$(dirname "$n")"; printf '%s\n' "$n" > "$P/src/$n"; done
+printf '%s\n' "${names[@]}" > "$P/tmp/files_upload.txt"
+printf '%s\n' old.txt dir/old2.txt missing.txt > "$P/tmp/files_delete.txt"
+echo old > "$P/old/old.txt"; echo old > "$P/old/old2.txt"
+printf 'rm -r -f par\nmkdir -p par/dir\nput -O par %s\nput -O par/dir %s\n' "$P/old/old.txt" "$P/old/old2.txt" \
+  | ftp_utf8 >/dev/null 2>&1
+
+ftp_step "$P" DEPLOY_PATH=par DEPLOY_MIRROR=true SCOPE=selective DEPLOY_FTP_PARALLEL=3
+check_eq "parallel: шаг проходит" 0 "$?"
+if grep -q "over 3 connection(s)" "$P/out.log"; then
+  pass "parallel: заливка идёт в DEPLOY_FTP_PARALLEL соединений"
+else
+  fail "parallel: заливка идёт в DEPLOY_FTP_PARALLEL соединений" "$(tail -20 "$P/out.log")"
+fi
+printf 'mirror par %s\n' "$P/back" | ftp_utf8 >/dev/null 2>&1
+if diff -r "$P/src" "$P/back" > "$P/diff" 2>&1; then
+  pass "parallel: на сервере ровно src — имена с пробелом, кавычкой и не-ASCII целы, удалённые удалены"
+else
+  fail "parallel: на сервере ровно src — имена с пробелом, кавычкой и не-ASCII целы, удалённые удалены" \
+    "$(cat "$P/diff")" "$(tail -20 "$P/out.log")"
+fi
+check_eq "parallel: сводка прогона без недолитых файлов" "" "$(cat "$P/summary" 2>/dev/null)"
+
+# Полный режим: mirror в несколько соединений, --delete убирает лишнее, .git не уезжает.
+M="$W/step-mirror"
+rm -rf "$M"; mkdir -p "$M/src/nested/deep" "$M/src/.git" "$M/tmp" "$M/old" "$M/back"
+echo a > "$M/src/a.txt"; echo k > "$M/src/img — копия.txt"; echo n > "$M/src/nested/deep/n.txt"
+echo ref > "$M/src/.git/HEAD"
+echo stale > "$M/old/stale.txt"
+printf 'rm -r -f mir\nmkdir -p mir\nput -O mir %s\n' "$M/old/stale.txt" | ftp_utf8 >/dev/null 2>&1
+
+ftp_step "$M" DEPLOY_PATH=mir DEPLOY_MIRROR=full SCOPE=full DEPLOY_FTP_PARALLEL=3
+check_eq "mirror: шаг проходит" 0 "$?"
+if grep -q "mirror attempt 1/3 over 3 connection(s)" "$M/out.log" && ! grep -q "Falling back" "$M/out.log"; then
+  pass "mirror: идёт в DEPLOY_FTP_PARALLEL соединений без отката"
+else
+  fail "mirror: идёт в DEPLOY_FTP_PARALLEL соединений без отката" "$(tail -20 "$M/out.log")"
+fi
+printf 'mirror mir %s\n' "$M/back" | ftp_utf8 >/dev/null 2>&1
+cp -a "$M/src" "$M/expected"; rm -rf "$M/expected/.git"
+if diff -r "$M/expected" "$M/back" > "$M/diff" 2>&1; then
+  pass "mirror: на сервере ровно дерево без .git, лишнее удалено"
+else
+  fail "mirror: на сервере ровно дерево без .git, лишнее удалено" "$(cat "$M/diff")" "$(tail -20 "$M/out.log")"
+fi
 
 suite_result "deploy-lock-integration"

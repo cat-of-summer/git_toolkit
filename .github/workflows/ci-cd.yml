@@ -1359,7 +1359,8 @@ jobs:
       DEPLOY_LOCAL_DIR: ${{ vars.DEPLOY_LOCAL_DIR || './' }}
       DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
       DEPLOY_MIRROR: ${{ needs.resolve-config.outputs.deploy_mirror }}
-      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || (needs.resolve-config.outputs.deploy_method == 'ftp' && '21' || '22') }}
+      DEPLOY_FTP_PARALLEL: ${{ vars.DEPLOY_FTP_PARALLEL || '4' }}
       DEPLOY_METHOD: ${{ needs.resolve-config.outputs.deploy_method }}
       APT_PACKAGES: ${{ needs.resolve-config.outputs.apt_packages }}
       BUILD_COMMAND: ${{ vars.BUILD_COMMAND }}
@@ -2692,63 +2693,114 @@ jobs:
           LOCAL_DIR="${LOCAL_DIR#./}"
           [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
 
+          JOBS="${DEPLOY_FTP_PARALLEL:-}"
+          case "$JOBS" in ''|*[!0-9]*|0) JOBS=4 ;; esac
+          ROOT="${DEPLOY_PATH%/}"
+
+          W="$RUNNER_TEMP/ftp_deploy"
           FAILED_FILE="$RUNNER_TEMP/ftp_failed.txt"
-          BATCH_CMD_FILE="$RUNNER_TEMP/lftp_batch_cmds.txt"
-          BATCH_LOG="$RUNNER_TEMP/lftp_batch.log"
-          SINGLE_CMD_FILE="$RUNNER_TEMP/lftp_single_cmd.txt"
+          rm -rf "$W"; mkdir -p "$W"
           : > "$FAILED_FILE"
 
-          run_lftp_session() {
-            local cmd_file="$1" max_retries="$2"
+          # An argument in lftp double quotes.
+          lq() { printf '"%s"' "$(printf '%s' "$1" | sed 's/[\\"]/\\&/g')"; }
+
+          # Reads lftp commands on stdin; $1 is cmd:fail-exit.
+          lftp_run() {
             {
               printf '%s\n' \
                 "set net:timeout 30" \
-                "set net:max-retries $max_retries" \
+                "set net:max-retries 3" \
                 "set net:reconnect-interval-base 5" \
+                "set net:reconnect-interval-multiplier 1" \
                 "set ftp:passive-mode true" \
                 "set ssl:verify-certificate no" \
                 "set ftp:list-options -a" \
-                "set cmd:fail-exit true"
-              cat "$cmd_file"
+                "set file:charset UTF-8" \
+                "set cmd:fail-exit $1"
+              cat
               echo "quit"
             } | lftp -u "$DEPLOY_USER,$DEPLOY_KEY" -p "$DEPLOY_PORT" "$DEPLOY_HOST"
           }
 
-          # Runs BATCH_CMD_FILE up to 3 times; fails only when every attempt failed.
-          run_lftp_batch() {
-            local what="$1" attempt
-            echo "Attempting batch $what..."
-            for attempt in 1 2 3; do
-              if run_lftp_session "$BATCH_CMD_FILE" 5 >"$BATCH_LOG" 2>&1; then
-                cat "$BATCH_LOG"
-                echo "Batch $what succeeded on attempt $attempt"
+          # lftp commands for every path of a list: put (relative to DEPLOY_LOCAL_DIR / DEPLOY_PATH),
+          # rm (relative to DEPLOY_PATH) or mkdir (absolute remote directory). Each command echoes
+          # "GT_OK <path>" only on success.
+          ftp_cmds() {
+            awk -v op="$1" -v root="$ROOT" -v src="./${LOCAL_DIR:+$LOCAL_DIR/}" '
+              function q(s) { gsub(/[\\"]/, "\\\\&", s); return "\"" s "\"" }
+              length($0) {
+                if (op == "put") {
+                  d = $0; sub(/\/?[^\/]*$/, "", d)
+                  d = (d == "") ? root : root "/" d
+                  if (d == "") d = "/"
+                  cmd = "put -O " q(d) " " q(src $0)
+                } else if (op == "rm") {
+                  cmd = "rm -f " q(root "/" $0)
+                } else {
+                  cmd = "mkdir -fp " q($0)
+                }
+                print cmd " && echo GT_OK " q($0)
+              }
+            ' "$2"
+          }
+
+          # Remote directories of the files in a list, only the deepest ones: mkdir -p makes the rest.
+          leaf_dirs() {
+            awk -v root="$ROOT" '
+              length($0) {
+                d = $0; sub(/\/?[^\/]*$/, "", d)
+                d = (d == "") ? root : root "/" d
+                if (d == "") d = "/"
+                dirs[d] = 1
+                p = d
+                while (sub(/\/[^\/]*$/, "", p) && p != "") parent[p] = 1
+              }
+              END { for (d in dirs) if (!(d in parent)) print d }
+            ' "$1"
+          }
+
+          # Runs one operation for every path of a list over JOBS connections and writes the paths
+          # without a GT_OK marker to $3: a session that died mid-chunk leaves its rest there too.
+          ftp_parallel() {
+            local op="$1" list="$2" left="$3" c pid pids=()
+            : > "$left"
+            [ -s "$list" ] || return 0
+            rm -f "$W"/chunk_*
+            split -n "r/$JOBS" "$list" "$W/chunk_"
+            for c in "$W"/chunk_*; do
+              [ -s "$c" ] || continue
+              ftp_cmds "$op" "$c" | lftp_run false > "$c.out" 2> "$c.err" &
+              pids+=($!)
+            done
+            for pid in "${pids[@]}"; do wait "$pid" || true; done
+            cat "$W"/chunk_*.out | sed -n 's/^GT_OK //p' | LC_ALL=C sort -u > "$W/ok"
+            LC_ALL=C comm -23 <(LC_ALL=C sort -u "$list") "$W/ok" > "$left"
+          }
+
+          # Up to 3 rounds of put or rm; a round retries only what the previous one did not confirm.
+          # What is left after the last round goes to FAILED_FILE.
+          ftp_rounds() {
+            local op="$1" round
+            cp "$2" "$W/left"
+            echo "FTP $op: $(grep -c . "$W/left" || true) file(s) over $JOBS connection(s)..."
+            for round in 1 2 3; do
+              if [ "$op" = put ]; then
+                # Directories first: parallel puts into a missing directory would fail. A directory
+                # that cannot be made shows up as a failed put.
+                leaf_dirs "$W/left" > "$W/dirs"
+                ftp_parallel mkdir "$W/dirs" "$W/dirs_left"
+              fi
+              ftp_parallel "$op" "$W/left" "$W/left_next"
+              mv "$W/left_next" "$W/left"
+              if ! [ -s "$W/left" ]; then
+                echo "FTP $op: done in round $round."
                 return 0
               fi
-              echo "::warning::Batch $what attempt $attempt/3 failed. lftp output:"
-              cat "$BATCH_LOG"
+              echo "::warning::FTP $op round $round/3: $(wc -l < "$W/left" | tr -d ' ') file(s) not confirmed. lftp errors:"
+              cat "$W"/chunk_*.err 2>/dev/null || true
             done
-            return 1
-          }
-
-          # Fallback: one lftp session per file, 3 attempts each; failures are collected, not fatal.
-          run_lftp_single() {
-            local label="$1" attempt
-            for attempt in 1 2 3; do
-              if run_lftp_session "$SINGLE_CMD_FILE" 1; then return 0; fi
-              echo "::warning::Per-file attempt $attempt/3 failed for '$label'"
-            done
-            echo "::warning::Skipping '$label' after 3 failed attempts"
-            printf '%s\n' "$label" >> "$FAILED_FILE"
-          }
-
-          remote_dir_of() {
-            local d
-            d="$(dirname "$1")"
-            if [ "$d" = "." ]; then printf '%s' "$DEPLOY_PATH"; else printf '%s/%s' "$DEPLOY_PATH" "$d"; fi
-          }
-
-          source_of() {
-            if [ -z "$LOCAL_DIR" ]; then printf './%s' "$1"; else printf './%s/%s' "$LOCAL_DIR" "$1"; fi
+            if [ "$op" = rm ]; then sed 's/^/(delete) /' "$W/left"; else cat "$W/left"; fi >> "$FAILED_FILE"
           }
 
           if [ "$SCOPE" = "full" ]; then
@@ -2757,72 +2809,51 @@ jobs:
             if [ "$DEPLOY_MIRROR" = "false" ]; then
               GIT_EX="--exclude-glob '.git*'"
             else
-              GIT_EX="--exclude-glob '.git' --exclude-glob '.github'"
+              # lftp matches a directory with a trailing slash: '.git' alone lets the directory through.
+              GIT_EX="--exclude-glob '.git/' --exclude-glob '.github/'"
             fi
 
-            printf '%s\n' "mirror -R --no-perms --parallel=2 --verbose $GIT_EX $DELETE \"$DEPLOY_LOCAL_DIR\" \"$DEPLOY_PATH\"" > "$BATCH_CMD_FILE"
+            MIRRORED=false
+            for attempt in 1 2 3; do
+              echo "FTP mirror attempt $attempt/3 over $JOBS connection(s)..."
+              if printf '%s\n' "mirror -R --no-perms --parallel=$JOBS --verbose $GIT_EX $DELETE $(lq "$DEPLOY_LOCAL_DIR") $(lq "$DEPLOY_PATH")" \
+                   | lftp_run true; then
+                MIRRORED=true
+                break
+              fi
+              echo "::warning::FTP mirror attempt $attempt/3 failed."
+            done
 
-            if ! run_lftp_batch mirror; then
-              echo "Falling back to per-file upload..."
-              SRC_BASE="${LOCAL_DIR:-.}"
-              while IFS= read -r local_path; do
-                rel_path="${local_path#./}"
-                [ -n "$LOCAL_DIR" ] && rel_path="${rel_path#"$LOCAL_DIR/"}"
-                remote_dir="$(remote_dir_of "$rel_path")"
-                printf '%s\n' "mkdir -fp \"$remote_dir\"" "put -O \"$remote_dir\" \"$local_path\"" > "$SINGLE_CMD_FILE"
-                run_lftp_single "$rel_path"
-              done < <(
+            if [ "$MIRRORED" != "true" ]; then
+              echo "Falling back to uploading every file..."
+              (
+                cd "./${LOCAL_DIR}"
                 if [ "$DEPLOY_MIRROR" = "false" ]; then
-                  find "$SRC_BASE" \( -name '.git' -o -name '.github' -o -name '.gitignore' -o -name '.gitattributes' -o -name '.gitmodules' \) -prune -o -type f -print
+                  find . \( -name '.git' -o -name '.github' -o -name '.gitignore' -o -name '.gitattributes' -o -name '.gitmodules' \) -prune -o -type f -print
                 else
-                  find "$SRC_BASE" \( -name '.git' -o -name '.github' \) -prune -o -type f -print
+                  find . \( -name '.git' -o -name '.github' \) -prune -o -type f -print
                 fi
-              )
+              ) | sed 's|^\./||' > "$W/all"
+              ftp_rounds put "$W/all"
             fi
 
           else
             UPLOAD_FILE="$RUNNER_TEMP/files_upload.txt"
             DELETE_FILE="$RUNNER_TEMP/files_delete.txt"
 
-            if [ -s "$UPLOAD_FILE" ]; then
-              : > "$BATCH_CMD_FILE"
-              while IFS= read -r file; do
-                [ -z "$file" ] && continue
-                remote_dir="$(remote_dir_of "$file")"
-                printf '%s\n' "mkdir -fp \"$remote_dir\"" "put -O \"$remote_dir\" \"$(source_of "$file")\"" >> "$BATCH_CMD_FILE"
-              done < "$UPLOAD_FILE"
-
-              if ! run_lftp_batch upload; then
-                echo "Falling back to per-file upload..."
-                while IFS= read -r file; do
-                  [ -z "$file" ] && continue
-                  remote_dir="$(remote_dir_of "$file")"
-                  printf '%s\n' "mkdir -fp \"$remote_dir\"" "put -O \"$remote_dir\" \"$(source_of "$file")\"" > "$SINGLE_CMD_FILE"
-                  run_lftp_single "$file"
-                done < "$UPLOAD_FILE"
-              fi
-            fi
-
-            if [ -s "$DELETE_FILE" ]; then
-              : > "$BATCH_CMD_FILE"
-              while IFS= read -r file; do
-                [ -z "$file" ] && continue
-                printf '%s\n' "rm -f \"$DEPLOY_PATH/$file\"" >> "$BATCH_CMD_FILE"
-              done < "$DELETE_FILE"
-
-              if ! run_lftp_batch delete; then
-                echo "Falling back to per-file delete..."
-                while IFS= read -r file; do
-                  [ -z "$file" ] && continue
-                  printf '%s\n' "rm -f \"$DEPLOY_PATH/$file\"" > "$SINGLE_CMD_FILE"
-                  run_lftp_single "$file"
-                done < "$DELETE_FILE"
-              fi
-            fi
+            if [ -s "$UPLOAD_FILE" ]; then ftp_rounds put "$UPLOAD_FILE"; fi
+            if [ -s "$DELETE_FILE" ]; then ftp_rounds rm "$DELETE_FILE"; fi
           fi
 
           if [ -s "$FAILED_FILE" ]; then
-            echo "::error::FTP deploy is incomplete: $(wc -l < "$FAILED_FILE" | tr -d ' ') file(s) failed after all retries:"
+            N_FAILED="$(wc -l < "$FAILED_FILE" | tr -d ' ')"
+            {
+              echo "### Files not deployed over FTP: $N_FAILED"
+              echo '```'
+              cat "$FAILED_FILE"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "::error::FTP deploy is incomplete: $N_FAILED file(s) failed after all retries:"
             sed 's/^/  /' "$FAILED_FILE"
             exit 1
           fi
@@ -3037,4 +3068,5 @@ jobs:
           [ -n "${CTX_ENV:-}" ] && rm -f "$CTX_ENV"
           [ -n "${TMP_KEY:-}" ] && rm -f "$TMP_KEY"
           rm -f "$RUNNER_TEMP/gt-ssh" "$RUNNER_TEMP/ssh_probe_password.log" "$RUNNER_TEMP/ssh_probe_key.log"
+          rm -rf "$RUNNER_TEMP/ftp_deploy"
           exit 0

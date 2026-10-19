@@ -76,6 +76,14 @@ if has_f "$blk" 'FTP deploy is incomplete' && has_f "$blk" 'exit 1'; then
 else
   fail "«$s» падает, если файлы не залиты после всех попыток"
 fi
+for want in 'DEPLOY_FTP_PARALLEL' 'split -n "r/$JOBS"' 'set file:charset UTF-8' 'GT_OK' '--parallel=$JOBS'; do
+  if has_f "$blk" "$want"; then pass "«$s» содержит $want"; else fail "«$s» содержит $want"; fi
+done
+if has "$CD" "^      DEPLOY_FTP_PARALLEL: "; then
+  pass "джоба cd передаёт DEPLOY_FTP_PARALLEL"
+else
+  fail "джоба cd передаёт DEPLOY_FTP_PARALLEL"
+fi
 
 acq="$(extract_step "$WF" deploy-lock)"
 for want in 'lk_acquire_all' 'lk_release_all' 'LK_SHARED_BASE=' 'lk_check_state' 'lk_heartbeat' 'lk_source_from_ref' \
