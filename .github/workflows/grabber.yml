@@ -825,9 +825,12 @@ jobs:
                 | awk -v p="$root/" 'index($0, p) == 1 { print substr($0, length(p) + 1) }' > "$work/rel"
 
               # cls -F marks directories with '/' and symlinks with '@'; a symlink is fetched as a file.
-              { grep '/$' "$work/rel" || true; } | sed 's|/$||' | { grep -vE '^$|^\.git' || true; } \
+              # The server lists "./" and "../" too: entering them would climb out of DEPLOY_PATH.
+              { grep '/$' "$work/rel" || true; } | sed 's|/$||' \
+                | { grep -vE '^$|^\.{1,2}$|^\.git|(^|/)\.\.?(/|$)' || true; } \
                 | sed "s|^|$prefix|" > "$work/dirs"
-              { grep -v '/$' "$work/rel" || true; } | sed 's|@$||' | { grep -vE '^$|^\.git' || true; } \
+              { grep -v '/$' "$work/rel" || true; } | sed 's|@$||' \
+                | { grep -vE '^$|^\.{1,2}$|^\.git|(^|/)\.\.?/' || true; } \
                 > "$work/files"
               cat "$work/files" >> "$SERVER_FILES"
 
@@ -835,7 +838,12 @@ jobs:
               : > "$work/pruned"
               if [ -s "$work/dirs" ]; then
                 while IFS= read -r d; do mkdir -p "./$d" 2>/dev/null || true; done < "$work/dirs"
-                git check-ignore --stdin < "$work/dirs" > "$work/ignored" 2>/dev/null || true
+                # Exit 1 = nothing ignored; anything above is a failure that must not pass silently.
+                rc=0; git check-ignore --stdin < "$work/dirs" > "$work/ignored" || rc=$?
+                if [ "$rc" -gt 1 ]; then
+                  echo "::error::git check-ignore failed (exit $rc) while filtering FTP directories." >&2
+                  exit 1
+                fi
                 comm -23 <(sort -u "$work/ignored") "$work/tracked_dirs" > "$work/pruned"
               fi
               cat "$work/pruned" >> "$SKIPPED_DIRS"
@@ -926,7 +934,11 @@ jobs:
             cp "$SERVER_FILES" "$PREFIXED"
           fi
 
-          git check-ignore --stdin < "$PREFIXED" > "$IGNORED_FILES" 2>/dev/null || true
+          rc=0; git check-ignore --stdin < "$PREFIXED" > "$IGNORED_FILES" || rc=$?
+          if [ "$rc" -gt 1 ]; then
+            echo "::error::git check-ignore failed (exit $rc) while filtering the file list." >&2
+            exit 1
+          fi
 
           comm -23 <(sort "$PREFIXED") <(sort "$IGNORED_FILES") \
             | if [ -n "$LOCAL_DIR" ]; then sed "s|^$LOCAL_DIR/||"; else cat; fi \
