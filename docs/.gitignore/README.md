@@ -4,6 +4,7 @@
 ## Папки
 
 - [Bitrix](Bitrix/)
+- [MODX](MODX/)
 - [Python](Python/)
 - [Wordpress](Wordpress/)
 
