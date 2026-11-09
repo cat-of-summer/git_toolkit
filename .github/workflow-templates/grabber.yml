@@ -29,6 +29,11 @@ on:
         type: choice
         options: ['false', 'true']
         default: 'false'
+      max_file_size:
+        description: 'Skip files larger than this (100MB, 50M, 500KB, 1GB or bytes; 0 or off = no limit). Empty = GRABBER_MAX_FILE_SIZE or 100MB (the GitHub push limit).'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -47,3 +52,4 @@ jobs:
       source_path: ${{ inputs.source_path }}
       commits: ${{ inputs.commits }}
       deploy_mirror: ${{ inputs.deploy_mirror }}
+      max_file_size: ${{ inputs.max_file_size }}

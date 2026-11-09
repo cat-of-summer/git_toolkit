@@ -1,0 +1,166 @@
+# Professional .gitignore for MODX Revolution
+# Scenario: DO NOT track core, DO NOT track installed packages (components), track project sources only.
+
+# ------------------------
+# OS / Editors / Tools
+# ------------------------
+# macOS
+.DS_Store
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# Editors / IDEs (put per-developer rules in global gitignore if desired)
+.idea/
+.vscode/
+nbproject/
+*.sublime-*
+*.swp
+*~
+
+# ------------------------
+# Misc system / VCS / other
+# ------------------------
+.hg/
+.svn/
+CVS/
+Thumbs.db
+
+# ------------------------
+# Node / build / caches
+# ------------------------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.cache/
+.cache-loader/
+
+# ------------------------
+# PHP / Composer / vendor
+# ------------------------
+vendor/
+composer.phar
+
+# ------------------------
+# Environment / logs / local secrets
+# ------------------------
+.env
+.env.local
+.env.*.local
+*.log
+phpunit.xml
+phpunit.xml.dist
+
+# ------------------------
+# Database / backups / large files
+# ------------------------
+*.sql
+*.sql.gz
+backup_*/
+*.sql.bz2
+*.dump
+
+# Large binary / media files (keep them out of git)
+*.psd
+*.ai
+*.psb
+*.sketch
+*.mov
+*.mp4
+*.avi
+*.mkv
+*.iso
+
+# ------------------------
+# Misc & archives
+# ------------------------
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+*.enc
+*.enc*
+
+# Office / media docs
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+*.pdf
+*.rtf
+
+# ------------------------
+# MODX config / secrets (DO NOT track)
+# ------------------------
+/config.core.php
+/manager/config.core.php
+/connectors/config.core.php
+/core/config/*.inc.php
+/core/config/*.php
+!/core/config/index.html
+
+# ------------------------
+# MODX runtime data (DO NOT track)
+# ------------------------
+/core/cache/
+/core/export/
+/core/import/
+/core/logs/
+/core/packages/
+/core/model/
+/assets/uploads/
+/assets/userfiles/
+/assets/cache/
+/assets/components/*/cache/
+
+# ------------------------
+# MODX core / system dirs (DO NOT track)
+# ------------------------
+/manager/
+/connectors/
+/setup/
+/core/*
+# Installed packages (extras) are restored via package manager / Composer
+/assets/components/*
+/ht.access
+
+# ------------------------
+# Project sources (TRACK)
+# ------------------------
+# File-based elements (templates, chunks, snippets, plugins)
+!/core/elements/
+!/core/elements/**
+# Custom components: unignore explicitly per component, e.g.:
+# !/core/components/my_component/
+# !/core/components/my_component/**
+# !/assets/components/my_component/
+# !/assets/components/my_component/**
+
+# Site templates, styles, scripts, images
+!/assets/
+!/assets/templates/
+!/assets/templates/**
+
+# Ignore build artifacts inside templates
+/assets/templates/*/node_modules/
+/assets/templates/*/vendor/
+
+# ------------------------
+# Logs / host specific
+# ------------------------
+/var/log/
+
+# Keep useful root files tracked
+!/index.php
+!/robots.txt
+!/.htaccess
+
+# End of file

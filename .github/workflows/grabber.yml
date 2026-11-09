@@ -29,6 +29,11 @@ on:
         type: choice
         options: ['false', 'true']
         default: 'false'
+      max_file_size:
+        description: 'Skip files larger than this (100MB, 50M, 500KB, 1GB or bytes; 0 or off = no limit). Empty = GRABBER_MAX_FILE_SIZE or 100MB (the GitHub push limit).'
+        required: false
+        type: string
+        default: ''
   workflow_call:
     inputs:
       source_repo:
@@ -56,6 +61,11 @@ on:
         required: false
         type: string
         default: 'false'
+      max_file_size:
+        description: 'Skip files larger than this (100MB, 50M, 500KB, 1GB or bytes; 0 or off = no limit). Empty = GRABBER_MAX_FILE_SIZE or 100MB (the GitHub push limit).'
+        required: false
+        type: string
+        default: ''
     secrets:
       DEPLOY_KEY:
         required: false
@@ -278,6 +288,7 @@ jobs:
           SOURCE_REPO_RAW: ${{ inputs.source_repo || vars.GRABBER_REPO }}
           SOURCE_REF_RAW: ${{ inputs.source_ref || vars.GRABBER_REF }}
           SOURCE_PATH_RAW: ${{ inputs.source_path || vars.GRABBER_PATH }}
+          MAX_FILE_SIZE_RAW: ${{ inputs.max_file_size || vars.GRABBER_MAX_FILE_SIZE }}
         run: |
           set -euo pipefail
 
@@ -367,10 +378,30 @@ jobs:
           LOCAL_DIR="${LOCAL_DIR#./}"
           [ "$LOCAL_DIR" = "." ] && LOCAL_DIR=""
 
+          # --- Size limit: GitHub rejects a push with a file over 100 MB ---
+          SIZE_SPEC="$(lower "$(trim "${MAX_FILE_SIZE_RAW:-}")")"
+          SIZE_SPEC="${SIZE_SPEC// /}"
+          [ -z "$SIZE_SPEC" ] && SIZE_SPEC="100mb"
+          case "$SIZE_SPEC" in
+            0|off|none) MAX_FILE_BYTES=0 ;;
+            *)
+              if ! printf '%s' "$SIZE_SPEC" | grep -qE '^[0-9]+(k|kb|m|mb|g|gb)?$'; then
+                fail "Cannot understand max_file_size='$SIZE_SPEC'. Expected a number with an optional suffix (e.g. 100MB, 50M, 500KB, 1GB), 0 or off."
+              fi
+              __num="${SIZE_SPEC%%[a-z]*}"
+              case "${SIZE_SPEC#"$__num"}" in
+                k|kb) MAX_FILE_BYTES=$((__num * 1024)) ;;
+                m|mb) MAX_FILE_BYTES=$((__num * 1024 * 1024)) ;;
+                g|gb) MAX_FILE_BYTES=$((__num * 1024 * 1024 * 1024)) ;;
+                *)    MAX_FILE_BYTES=$__num ;;
+              esac
+              ;;
+          esac
+
           if [ "$GRAB_MODE" = "repo" ]; then
-            echo "mode=repo source=$SOURCE_URL ref=${SOURCE_REF:-<default>} path=${SOURCE_PATH:-<root>} mirror=$DEPLOY_MIRROR"
+            echo "mode=repo source=$SOURCE_URL ref=${SOURCE_REF:-<default>} path=${SOURCE_PATH:-<root>} mirror=$DEPLOY_MIRROR max_file_bytes=$MAX_FILE_BYTES"
           else
-            echo "mode=server method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR apt=${APT_PACKAGES:-<none>}"
+            echo "mode=server method=$DEPLOY_METHOD mirror=$DEPLOY_MIRROR apt=${APT_PACKAGES:-<none>} max_file_bytes=$MAX_FILE_BYTES"
           fi
 
           {
@@ -381,6 +412,7 @@ jobs:
             echo "LOCAL_DIR=$LOCAL_DIR"
             echo "DEPLOY_METHOD=$DEPLOY_METHOD"
             echo "DEPLOY_MIRROR=$DEPLOY_MIRROR"
+            echo "MAX_FILE_BYTES=$MAX_FILE_BYTES"
           } >> "$GITHUB_ENV"
           echo "apt_packages=$APT_PACKAGES" >> "$GITHUB_OUTPUT"
 
@@ -1057,7 +1089,10 @@ jobs:
             fi
           else
             RC=0
+            SIZE_ARGS=()
+            if [ "${MAX_FILE_BYTES:-0}" -gt 0 ]; then SIZE_ARGS=(--max-size="$MAX_FILE_BYTES"); fi
             rsync -avz --progress \
+              "${SIZE_ARGS[@]}" \
               -e "$GT_SSH" \
               --files-from="$TO_DOWNLOAD" \
               --ignore-missing-args \
@@ -1080,6 +1115,51 @@ jobs:
               if [ -f "$DEST_DIR/$file" ]; then echo "$file" >> "$RUNNER_TEMP/server_files.txt"; fi
             done < "$RUNNER_TEMP/commits_original.txt"
             echo "Files actually downloaded from the server: $(wc -l < "$RUNNER_TEMP/server_files.txt")"
+          fi
+
+      - name: Skip oversized files
+        if: ${{ env.NOTHING_TO_SYNC != 'true' && env.MAX_FILE_BYTES != '0' }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          git config core.quotepath false
+
+          TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
+          OVERSIZED="$RUNNER_TEMP/oversized.txt"
+          : > "$OVERSIZED"
+
+          # Only what this run brought in is checked. The files stay in server_files.txt on purpose:
+          # for the mirror they still exist in the source, so their tracked copies are not deleted.
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            if [ -n "$LOCAL_DIR" ]; then lp="$LOCAL_DIR/$file"; else lp="$file"; fi
+            [ -f "./$lp" ] || continue
+            size=$(stat -c %s "./$lp")
+            [ "$size" -gt "$MAX_FILE_BYTES" ] || continue
+
+            printf '%s\t%s\n' "$size" "$lp" >> "$OVERSIZED"
+            rm -f "./$lp"
+            # Keep the version already in the repository instead of recording a deletion
+            # (not in commits mode: there the files are carried over to a branch cut from an older commit).
+            if [ "$COMMITS_MODE" != "true" ] && git ls-files --error-unmatch -- "$lp" >/dev/null 2>&1; then
+              git checkout -q -- "$lp"
+            fi
+          done < "$TO_DOWNLOAD"
+
+          if [ -s "$OVERSIZED" ]; then
+            N=$(wc -l < "$OVERSIZED")
+            LIMIT_MB=$(( (MAX_FILE_BYTES + 1048575) / 1048576 ))
+            {
+              echo "### Skipped: $N file(s) larger than $MAX_FILE_BYTES bytes (~${LIMIT_MB} MB)"
+              echo '| Size, MB | File |'
+              echo '| ---: | --- |'
+              while IFS=$'\t' read -r size lp; do
+                echo "| $(( (size + 1048575) / 1048576 )) | \`$lp\` |"
+              done < "$OVERSIZED"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::$N file(s) skipped: larger than max_file_size ($MAX_FILE_BYTES bytes), GitHub would reject the push. List in the job summary: $(cut -f2 "$OVERSIZED" | head -20 | tr '\n' ' ')"
+          else
+            echo "No file exceeds $MAX_FILE_BYTES bytes."
           fi
 
       - name: Commit and push
