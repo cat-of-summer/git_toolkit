@@ -806,7 +806,23 @@ jobs:
           SERVER_FILES="$RUNNER_TEMP/server_files.txt"
           TO_DOWNLOAD="$RUNNER_TEMP/to_download.txt"
           SKIPPED_DIRS="$RUNNER_TEMP/skipped_dirs.txt"
-          : > "$SERVER_FILES"
+          # Directories the server would not let us list, relative to DEPLOY_PATH. Their files are
+          # not grabbed, and mirror mode keeps the tracked files under them instead of deleting.
+          UNLISTED="$RUNNER_TEMP/unlisted_dirs.txt"
+          : > "$SERVER_FILES"; : > "$UNLISTED"
+
+          report_unlisted() {
+            [ -s "$UNLISTED" ] || return 0
+            sort -u -o "$UNLISTED" "$UNLISTED"
+            {
+              echo "### Directories the server did not let us list: $(wc -l < "$UNLISTED")"
+              echo "Their files are not grabbed; with deploy_mirror the tracked files under them are kept."
+              echo '```'
+              cat "$UNLISTED"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Cannot list $(wc -l < "$UNLISTED") director(y/ies) on the server, their files are not grabbed (tracked files under them are kept): $(head -20 "$UNLISTED" | tr '\n' ' ')"
+          }
 
           # FTP: walk the tree level by level over several connections and never enter a directory
           # this repository's .gitignore excludes as a whole, unless tracked files live under it.
@@ -890,12 +906,10 @@ jobs:
                 echo "::error::Cannot list DEPLOY_PATH '$root/' on the FTP server — see the lftp errors above." >&2
                 exit 1
               fi
-              echo "::warning::Cannot list $(wc -l < "$failed") director(y/ies) on the FTP server, their files are not grabbed: $(head -20 "$failed" | tr '\n' ' ')"
-              if [ "$DEPLOY_MIRROR" = "true" ]; then
-                echo "::error::deploy_mirror=true with unlisted directories would delete every tracked file under them — refusing." >&2
-                exit 1
-              fi
+              awk -v p="$root/" 'index($0, p) == 1 { s = substr($0, length(p) + 1); sub(/\/$/, "", s); print s }' \
+                "$failed" >> "$UNLISTED"
             fi
+            report_unlisted
           }
 
           # Fills SERVER_FILES: in commits mode — the commit files that exist on the server,
@@ -917,9 +931,32 @@ jobs:
             fi
 
             if [ "$DEPLOY_METHOD" = "rsync" ]; then
+              # find reports a directory it cannot read and goes on, then exits 1: that must not sink
+              # the whole grab. LC_ALL=C keeps the messages parseable; -printf output to a pipe is raw.
+              local out="$RUNNER_TEMP/find_out.txt" err="$RUNNER_TEMP/find_err.txt" rc=0
               "$GT_SSH" "$DEPLOY_USER@$DEPLOY_HOST" \
-                "find -L '$DEPLOY_PATH' -type f -printf '%P\n'" \
-                | { grep -vE '^\.git' || true; } > "$SERVER_FILES"
+                "LC_ALL=C find -L '$DEPLOY_PATH' -type f -printf '%P\n'" \
+                > "$out" 2> "$err" || rc=$?
+              { grep -vE '^\.git' "$out" || true; } > "$SERVER_FILES"
+
+              if [ "$rc" -ne 0 ]; then
+                cat "$err" >&2
+                # 1 is find's own exit code for per-path errors; 255 and the rest come from ssh.
+                if [ "$rc" -ne 1 ] || ! grep -qE "^find: '.*': " "$err"; then
+                  echo "::error::Listing the server over SSH failed (exit $rc) — see the errors above." >&2
+                  exit 1
+                fi
+                sed -nE "s/^find: '(.*)': .*$/\1/p" "$err" \
+                  | awk -v r="$path" -v p="$path/" '
+                      $0 == r || $0 == r "/" { root = 1; next }
+                      index($0, p) == 1 { print substr($0, length(p) + 1) }
+                      END { exit (root ? 1 : 0) }' >> "$UNLISTED" || {
+                  echo "::error::Cannot list DEPLOY_PATH '$DEPLOY_PATH' on the server — see the find errors above." >&2
+                  exit 1
+                }
+              fi
+              { grep -vE '^\.git' "$UNLISTED" || true; } > "$UNLISTED.tmp"; mv "$UNLISTED.tmp" "$UNLISTED"
+              report_unlisted
             else
               list_ftp
             fi
@@ -1189,7 +1226,14 @@ jobs:
               git ls-files | { grep -vE '^\.git' || true; } > "$TRACKED_REL"
             fi
 
+            # Files under a directory the server would not list are unknown, not gone: keep them.
+            UNLISTED="$RUNNER_TEMP/unlisted_dirs.txt"
+            [ -f "$UNLISTED" ] || : > "$UNLISTED"
             comm -23 <(sort -u "$TRACKED_REL") <(sort -u "$SERVER_FILES") \
+              | awk 'FILENAME == ARGV[1] { if ($0 != "") d[++n] = $0; next }
+                     { for (i = 1; i <= n; i++)
+                         if ($0 == d[i] || index($0, d[i] "/") == 1) { print "Kept (unlisted on the server): " $0 > "/dev/stderr"; next }
+                       print }' "$UNLISTED" - \
               | while IFS= read -r rel; do
                   [ -z "$rel" ] && continue
                   echo "Removing: $(local_path "$rel")"
